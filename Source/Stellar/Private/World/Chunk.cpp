@@ -1,6 +1,6 @@
 // Fill out your copyright notice in the Description page of Project Settings.
-#include "DrawDebugHelpers.h"
 #include "World/Chunk.h"
+#include "DrawDebugHelpers.h"
 
 // Sets default values
 AChunk::AChunk()
