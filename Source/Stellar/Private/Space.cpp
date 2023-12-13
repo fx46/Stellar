@@ -59,7 +59,7 @@ void ASpace::SetDot(int x, int y, int z, uint8_t value)
 
 	SetDotInChunk(chunkX, chunkY, chunkZ, dotXinChunk, dotYinChunk, dotZinChunk, value);
 
-	if (x == AChunk::viewableChunkDotSize && y == AChunk::viewableChunkDotSize && z == AChunk::viewableChunkDotSize)
+	if (x % AChunk::viewableChunkDotSize == 0 && y % AChunk::viewableChunkDotSize == 0 && z % AChunk::viewableChunkDotSize == 0)
 	{
 		SetDotInChunk(chunkX - 1, chunkY - 1, chunkZ - 1, AChunk::viewableChunkDotSize, AChunk::viewableChunkDotSize, AChunk::viewableChunkDotSize, value);
 		SetDotInChunk(chunkX - 1, chunkY - 1, chunkZ, AChunk::viewableChunkDotSize, AChunk::viewableChunkDotSize, dotZinChunk, value);
@@ -69,33 +69,33 @@ void ASpace::SetDot(int x, int y, int z, uint8_t value)
 		SetDotInChunk(chunkX, chunkY - 1, chunkZ, dotXinChunk, AChunk::viewableChunkDotSize, dotZinChunk, value);
 		SetDotInChunk(chunkX, chunkY, chunkZ - 1, dotXinChunk, dotYinChunk, AChunk::viewableChunkDotSize, value);
 	}
-	else if (x == AChunk::viewableChunkDotSize && y == AChunk::viewableChunkDotSize)
+	else if (x % AChunk::viewableChunkDotSize == 0 && y % AChunk::viewableChunkDotSize == 0)
 	{
 		SetDotInChunk(chunkX - 1, chunkY - 1, chunkZ, AChunk::viewableChunkDotSize, AChunk::viewableChunkDotSize, dotZinChunk, value);
 		SetDotInChunk(chunkX - 1, chunkY, chunkZ, AChunk::viewableChunkDotSize, dotYinChunk, dotZinChunk, value);
 		SetDotInChunk(chunkX, chunkY - 1, chunkZ, dotXinChunk, AChunk::viewableChunkDotSize, dotZinChunk, value);
 	}
-	else if (x == AChunk::viewableChunkDotSize && z == AChunk::viewableChunkDotSize)
+	else if (x % AChunk::viewableChunkDotSize == 0 && z % AChunk::viewableChunkDotSize == 0)
 	{
 		SetDotInChunk(chunkX - 1, chunkY, chunkZ - 1, AChunk::viewableChunkDotSize, dotYinChunk, AChunk::viewableChunkDotSize, value);
 		SetDotInChunk(chunkX - 1, chunkY, chunkZ, AChunk::viewableChunkDotSize, dotYinChunk, dotZinChunk, value);
 		SetDotInChunk(chunkX, chunkY, chunkZ - 1, dotXinChunk, dotYinChunk, AChunk::viewableChunkDotSize, value);
 	}
-	else if (y == AChunk::viewableChunkDotSize && z == AChunk::viewableChunkDotSize)
+	else if (y % AChunk::viewableChunkDotSize == 0 && z % AChunk::viewableChunkDotSize == 0)
 	{
 		SetDotInChunk(chunkX, chunkY - 1, chunkZ - 1, dotXinChunk, AChunk::viewableChunkDotSize, AChunk::viewableChunkDotSize, value);
 		SetDotInChunk(chunkX, chunkY - 1, chunkZ, dotXinChunk, AChunk::viewableChunkDotSize, dotZinChunk, value);
 		SetDotInChunk(chunkX, chunkY, chunkZ - 1, dotXinChunk, dotYinChunk, AChunk::viewableChunkDotSize, value);
 	}
-	else if (x == AChunk::viewableChunkDotSize)
+	else if (x % AChunk::viewableChunkDotSize == 0)
 	{
 		SetDotInChunk(chunkX - 1, chunkY, chunkZ, AChunk::viewableChunkDotSize, dotYinChunk, dotZinChunk, value);
 	}
-	else if (y == AChunk::viewableChunkDotSize)
+	else if (y % AChunk::viewableChunkDotSize == 0)
 	{
 		SetDotInChunk(chunkX, chunkY - 1, chunkZ, dotXinChunk, AChunk::viewableChunkDotSize, dotZinChunk, value);
 	}
-	else if (z == AChunk::viewableChunkDotSize)
+	else if (z % AChunk::viewableChunkDotSize == 0)
 	{
 		SetDotInChunk(chunkX, chunkY, chunkZ - 1, dotXinChunk, dotYinChunk, AChunk::viewableChunkDotSize, value);
 	}
