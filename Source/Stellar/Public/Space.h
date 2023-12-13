@@ -27,6 +27,6 @@ public:
 	void SetDotInChunk(int chunkX, int chunkY, int chunkZ, int dotX, int dotY, int dotZ, uint8_t value);
 
 private:
-	static const int NumChunkOnAxis = 2;
+	static const int NumChunkOnAxis = 16;
 	AChunk* chunks[NumChunkOnAxis][NumChunkOnAxis][NumChunkOnAxis];
 };

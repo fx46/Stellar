@@ -29,8 +29,22 @@ void ASpace::BeginPlay()
 		}
 	}
 
-
-	SetDot(1, 1, 3, 0xFF);
+	int planetRadius = 50;
+	FVector planetCenter = FVector(128, 128, 128);
+	for (int i = -planetRadius; i <= planetRadius; ++i)
+	{
+		for (int j = -planetRadius; j <= planetRadius; ++j)
+		{
+			for (int k = -planetRadius; k <= planetRadius; ++k)
+			{
+				float nodeDistance = FVector::Distance(planetCenter, FVector(i + planetCenter.X, j + planetCenter.Y, k + planetCenter.Z));
+				if (nodeDistance < planetRadius)
+				{
+					SetDot(i + planetCenter.X, j + planetCenter.Y, k + planetCenter.Z, 0xFF);
+				}
+			}
+		}
+	}
 }
 
 // Called every frame
