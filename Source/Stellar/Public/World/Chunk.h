@@ -26,6 +26,11 @@ public:
 	virtual void Tick(float DeltaTime) override;
 	void RedrawMesh();
 
+	static const int actualChunkDotSize = 16;
+	static const int viewableChunkDotSize = actualChunkDotSize - 1;
+	bool bNeedsToUpdate = true;
+	uint8_t chunkDots[actualChunkDotSize][actualChunkDotSize][actualChunkDotSize];
+
 private:
 	Cell CellAt(int cellCoordX, int cellCoordY, int cellCoordZ);
 	void DrawDebugInfo();
@@ -36,14 +41,11 @@ private:
 		UMaterial* material;
 	UPROPERTY(EditAnywhere, Category = ProcMesh)
 		bool bDrawDebugInfo = false;
+
 	TArray<FVector> vertices;
 	TArray<int32> triangles;
 	TArray<FVector> normals;
 	TArray<FVector2D> UV0;
 	TArray<FProcMeshTangent> tangents;
 	TArray<FLinearColor> vertexColors;
-	bool bNeedsToUpdate = true;
-	static const int actualChunkDotSize = 5;
-	static const int viewableChunkDotSize = actualChunkDotSize - 1;
-	uint8_t chunkDots[actualChunkDotSize][actualChunkDotSize][actualChunkDotSize];
 };

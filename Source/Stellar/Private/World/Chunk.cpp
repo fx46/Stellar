@@ -18,7 +18,6 @@ void AChunk::BeginPlay()
 {
 	Super::BeginPlay();
 	
-	chunkDots[1][1][1] = 0xFF;
 }
 
 // Called every frame
@@ -149,9 +148,9 @@ void AChunk::DrawDebugInfo()
 				}
 
 				if (x == viewableChunkDotSize || y == viewableChunkDotSize || z == viewableChunkDotSize)
-					DrawDebugSphere(GetWorld(), GetActorLocation() + FVector(x, y, z) * 100.0f, 7.5f, 12, FColor::Red);
-				else
-					DrawDebugSphere(GetWorld(), GetActorLocation() + FVector(x, y, z) * 100.0f, 5.0f, 12, FColor::Blue);
+					DrawDebugSphere(GetWorld(), GetActorLocation() + FVector(x, y, z) * 100.0f, 7.5f, 6, FColor::Red);
+				//else
+				//	DrawDebugSphere(GetWorld(), GetActorLocation() + FVector(x, y, z) * 100.0f, 5.0f, 6, FColor::Blue);
 			}
 		}
 	}
