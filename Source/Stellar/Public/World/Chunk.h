@@ -25,22 +25,32 @@ public:
 	// Called every frame
 	virtual void Tick(float DeltaTime) override;
 	void RedrawMesh();
-
-	static const int actualChunkDotSize = 16;
+	static const int actualChunkDotSize = 13;
 	static const int viewableChunkDotSize = actualChunkDotSize - 1;
 	bool bNeedsToUpdate = true;
 	uint8_t chunkDots[actualChunkDotSize][actualChunkDotSize][actualChunkDotSize];
 
+	bool IsHigherLodTowardsPosX = false;
+	bool IsHigherLodTowardsNegX = false;
+	bool IsHigherLodTowardsPosY = false;
+	bool IsHigherLodTowardsNegY = false;
+	bool IsHigherLodTowardsPosZ = false;
+	bool IsHigherLodTowardsNegZ = false;
+
+	LodLevel Lod = LodLevel::CellWidthOf1;
+
 private:
 	Cell CellAt(int cellCoordX, int cellCoordY, int cellCoordZ);
+	TransCell TransCellAt(int cellCoordX, int cellCoordY, int cellCoordZ, Direction directionOfHigherLod);
 	void DrawDebugInfo();
 
 	UPROPERTY(VisibleAnywhere)
-		UProceduralMeshComponent* mesh;
+	UProceduralMeshComponent* mesh;
 	UPROPERTY(EditAnywhere, Category = ProcMesh)
-		UMaterial* material;
+	UMaterial* material;
 	UPROPERTY(EditAnywhere, Category = ProcMesh)
-		bool bDrawDebugInfo = false;
+	bool bDrawDebugInfo = false;
+	bool bOldDrawDebugInfo = false;
 
 	TArray<FVector> vertices;
 	TArray<int32> triangles;

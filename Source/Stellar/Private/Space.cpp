@@ -25,6 +25,16 @@ void ASpace::BeginPlay()
 				FActorSpawnParameters SpawnParameters;
 				chunks[x][y][z] = 
 					GetWorld()->SpawnActor<AChunk>(AChunk::StaticClass(), FVector(x, y, z) * 100.0f * AChunk::viewableChunkDotSize, FRotator::ZeroRotator);
+				if (x == 6 && y == 9 && z == 10)
+				{
+					chunks[x][y][z]->Lod = LodLevel::CellWidthOf2;
+					chunks[x][y][z]->IsHigherLodTowardsPosX = true;
+					chunks[x][y][z]->IsHigherLodTowardsNegX = true;
+					chunks[x][y][z]->IsHigherLodTowardsPosY = true;
+					chunks[x][y][z]->IsHigherLodTowardsNegY = true;
+					chunks[x][y][z]->IsHigherLodTowardsPosZ = true;
+					chunks[x][y][z]->IsHigherLodTowardsNegZ = true;
+				}
 			}
 		}
 	}
