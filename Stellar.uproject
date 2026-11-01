@@ -1,6 +1,6 @@
 {
 	"FileVersion": 3,
-	"EngineAssociation": "{ACFF1613-4232-07BB-2441-DDAB2DE5E437}",
+	"EngineAssociation": "5.8",
 	"Category": "",
 	"Description": "Stellar: a robotic industrial civilization on a 1000 km deformable planet.",
 	"Modules": [
