@@ -1,3 +1,6 @@
+IMPORTANT MOODBOARD TO FOLLOW:
+https://app.milanote.com/1Xngqm1geLoo8b?p=xxai85m7tti
+
 > Copied from the Godot project (`fx46/StellarGodot`, `NewGodotProject/docs/DEVELOPMENT_PLAN.md`, commit a0d7cc1). It still describes the Godot code; the Unreal port follows its milestones.
 
 # Stellar development plan
