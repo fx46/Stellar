@@ -36,6 +36,10 @@ bool FPlanetTerrain::HoldsProceduralSurface(const FNodeKey& K) const
 	const FVector3d M = Octree.Min(K);
 	const bool bHolds = MayHold(M.X, M.Y, M.Z, Octree.Size(K.Level), 2);
 	FWriteScopeLock Lock(HoldsLock);
+	// A pure cache: bounded, so it does not grow with the area explored (a cut needs a few
+	// thousand entries; a full cache is simply rebuilt as nodes are tested again).
+	if (Holds.Num() >= 400000)
+		Holds.Reset();
 	Holds.Add(K, bHolds);
 	return bHolds;
 }
@@ -177,7 +181,7 @@ void FPlanetTerrain::Mesh(const FNodeKey& K, int32 CoarserFaces, const FTerrainE
 				}
 	};
 
-	auto Color = [&](const FVector3f& P, const FVector3f& N) { return VertexColor(O, P, N, bEdited, Stride); };
+	auto Color = [&](const FVector3f& P, const FVector3f& N) { return VertexColor(O, P, N, bEdited ? Edits : nullptr, Stride); };
 	const FVertexColorFunc ColorRef(Color);
 	const FSparseCornerFunc CornersRef(FillCorners);
 	TransvoxelMesher::MeshRegion(Out, Density, FVector3f::ZeroVector, Stride, Cells, CoarserFaces, &ColorRef, bDense ? nullptr : &CornersRef);
@@ -242,7 +246,14 @@ bool FPlanetTerrain::Trace(const FVector3d& From, const FVector3d& Dir, double M
 	return false;
 }
 
-FColor FPlanetTerrain::VertexColor(const FVector3d& NodeMin, const FVector3f& Local, const FVector3f& Normal, bool bEdited, float Stride) const
+FGeoSample FPlanetTerrain::RockAt(const FVector3d& P, const FTerrainEdits* Edits) const
+{
+	if (Edits != nullptr && Edits->MaterialAt(P) == EEditMaterial::Fill)
+		return { EGeoMaterial::Fill, 0.8f };
+	return Field.Geology(P, -Field.Density(P));
+}
+
+FColor FPlanetTerrain::VertexColor(const FVector3d& NodeMin, const FVector3f& Local, const FVector3f& Normal, const FTerrainEdits* Edits, float Stride) const
 {
 	const FVector3d P = NodeMin + FVector3d(Local);
 	const double R = Field.GetRadius();
@@ -251,16 +262,36 @@ FColor FPlanetTerrain::VertexColor(const FVector3d& NodeMin, const FVector3f& Lo
 	const FHeightLayers L = Field.Layers(Up.X * R, Up.Y * R, Up.Z * R);
 	const float Slope = float(FVector3d(Normal).Dot(Up));
 	const FLinearColor Surface = Field.SurfaceColor(L, Rp - R, Slope);
-	if (!bEdited)
-		return Surface.ToFColor(true);
+	// Alpha: how bare the rock is (0 dust, 1 rock), for the material's roughness.
+	const uint8 Bare = uint8(FMath::Clamp((1.f - FMath::SmoothStep(0.62f, 0.86f, Slope)) * 255.f + float(L.Outcrop) * 20.f, 0.f, 255.f));
+	if (Edits == nullptr)
+	{
+		FColor C = Surface.ToFColor(true);
+		C.A = Bare;
+		return C;
+	}
+	// Built ground (sampled half a cell inside, where the vertex's lattice points are).
+	const FVector3d Inside = P - FVector3d(Normal) * (Stride * 0.5);
+	if (Edits->MaterialAt(Inside) == EEditMaterial::Fill)
+	{
+		FColor C = Field.MaterialColor(EGeoMaterial::Fill, P).ToFColor(true);
+		C.A = 200;
+		return C;
+	}
 	// Depth under the original ground: zero on untouched surface (within the mesh's own
 	// interpolation error), growing in a cut.
 	const double Depth = (R + L.Total()) - Rp;
 	const double Skin = 0.25 + 0.5 * Stride;
 	if (Depth < Skin)
-		return Surface.ToFColor(true);
+	{
+		FColor C = Surface.ToFColor(true);
+		C.A = Bare;
+		return C;
+	}
 	const FGeoSample Geo = Field.Geology(P, Depth);
-	FLinearColor Rock = Geo.Material == EGeoMaterial::Regolith ? Surface * 0.62f : Field.MaterialColor(Geo.Material, P);
+	const FLinearColor Rock = Geo.Material == EGeoMaterial::Regolith ? Surface * 0.62f : Field.MaterialColor(Geo.Material, P);
 	const float T = float(FMath::SmoothStep(Skin, Skin + 0.35, Depth));
-	return FMath::Lerp(Surface * 0.8f, Rock, T).ToFColor(true);
+	FColor C = FMath::Lerp(Surface * 0.8f, Rock, T).ToFColor(true);
+	C.A = uint8(FMath::Lerp(float(Bare), Geo.Material == EGeoMaterial::Regolith ? 60.f : 230.f, T));
+	return C;
 }

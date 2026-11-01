@@ -71,10 +71,10 @@ bool FStellarHeightBounds::RunTest(const FString&)
 	const FPlanetField F(1000000.0);
 	FRandomStream Rng(7);
 	int32 Outside = 0;
-	for (int32 I = 0; I < 300; I++)
+	for (int32 I = 0; I < 1500; I++)
 	{
 		const FVector3d U = FVector3d(Rng.FRandRange(-1, 1), Rng.FRandRange(-1, 1), Rng.FRandRange(-1, 1)).GetSafeNormal();
-		const double Reach = FMath::Pow(10.0, Rng.FRandRange(0.0, 4.7));
+		const double Reach = FMath::Pow(10.0, Rng.FRandRange(-0.5, 4.7));
 		const FVector3d P = U * F.GetRadius();
 		const FRange Bounds = F.HeightRange(P.X, P.Y, P.Z, Reach);
 		for (int32 J = 0; J < 20; J++)
@@ -89,6 +89,19 @@ bool FStellarHeightBounds::RunTest(const FString&)
 		}
 	}
 	TestEqual(TEXT("heights outside their bounds"), Outside, 0);
+	// And the global bounds hold for every layer together, landmarks included.
+	int32 OutsideGlobal = 0;
+	double Highest = -1e9, Lowest = 1e9;
+	for (int32 I = 0; I < 200000; I++)
+	{
+		const FVector3d U = FVector3d(Rng.FRandRange(-1, 1), Rng.FRandRange(-1, 1), Rng.FRandRange(-1, 1)).GetSafeNormal();
+		const double H = F.Height(U);
+		Highest = FMath::Max(Highest, H);
+		Lowest = FMath::Min(Lowest, H);
+		if (H < FPlanetField::MinHeight || H > FPlanetField::MaxHeight)
+			OutsideGlobal++;
+	}
+	TestEqual(FString::Printf(TEXT("heights outside the planet's bounds (sampled %.0f to %.0f m)"), Lowest, Highest), OutsideGlobal, 0);
 	return true;
 }
 
@@ -170,7 +183,7 @@ bool FStellarEdits::RunTest(const FString&)
 
 	// A dig changes the density at every lattice point by strength * weight, and removes rock.
 	FEditResult R;
-	const FSculptOp Dig = FSculptOp::Make(Ground, -Up, 2.5, 0.3);
+	const FEditOp Dig = FEditOp::Sculpt(Ground, -Up, 2.5, 0.3);
 	const TSharedRef<const FTerrainEdits> E = Empty->Apply(Dig, T.Field, R);
 	TestTrue(TEXT("the dig changed something"), R.bChanged && E->NumBricks() > 0);
 	double Removed = 0;
@@ -194,7 +207,7 @@ bool FStellarEdits::RunTest(const FString&)
 
 	// Building back the same amount restores the ground.
 	FEditResult R2;
-	const TSharedRef<const FTerrainEdits> Back = E->Apply(FSculptOp::Make(Ground, -Up, 2.5, -0.3), T.Field, R2);
+	const TSharedRef<const FTerrainEdits> Back = E->Apply(FEditOp::Sculpt(Ground, -Up, 2.5, -0.3), T.Field, R2);
 	TestTrue(TEXT("build restores the density"), FMath::Abs(T.Density(Ground, &Back.Get()) - T.Density(Ground, nullptr)) < 1e-4);
 
 	// Saved edits reload exactly.

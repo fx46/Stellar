@@ -2,9 +2,14 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
+#include "Game/TestSite.h"
 #include "StellarWorld.generated.h"
 
 class APlanetTerrainActor;
+class AStructuresActor;
+class AFluidActor;
+class UPostProcessComponent;
+class UVolumetricCloudComponent;
 class UDirectionalLightComponent;
 class USkyAtmosphereComponent;
 class USkyLightComponent;
@@ -35,6 +40,18 @@ public:
 	void EnsureBuilt();
 
 	APlanetTerrainActor* GetTerrain() const { return Terrain; }
+	AStructuresActor* GetStructures() const { return Structures; }
+	AFluidActor* GetFluids() const { return Fluids; }
+
+	/** The industrial test site (milestone 0b), laid out at startup unless -notestsite. */
+	const FTestSitePlan& GetTestSite() const { return TestSite; }
+	bool HasTestSite() const { return bTestSite; }
+	/** Lay the test site out on the current terrain (edits, deposits, structures, water). */
+	void BuildTestSite();
+
+	/** A landmark (mesa or spire field) visible from the site, for views: its ground point and
+	 * kind; false if none is within 40 km. */
+	bool FindLandmark(FVector3d& OutPoint, FString& OutKind) const;
 
 	/** The start site (planet frame): its ground point, up and view direction. */
 	FVector3d SiteSurface = FVector3d::ZeroVector;
@@ -50,8 +67,14 @@ public:
 	/** A shared solid-colour material instance for stand-ins and gadgets. */
 	UMaterialInterface* SolidMaterial(const FLinearColor& Color, float Roughness, float Metallic = 0.f, float Emissive = 0.f);
 
+	/** A translucent unlit colour, for placement previews and selection. */
+	UMaterialInterface* GhostMaterial(const FLinearColor& Color);
+
 	/** The unlit, vertex-coloured material the tool cursor uses. */
 	UMaterialInterface* CursorMaterial() const { return Cursor; }
+
+	/** Water (translucent). */
+	UMaterialInterface* WaterMaterial() const { return Water; }
 
 protected:
 	virtual void BeginPlay() override;
@@ -76,6 +99,24 @@ private:
 	UPROPERTY(VisibleAnywhere)
 	TObjectPtr<USkyLightComponent> SkyLight;
 
+	UPROPERTY(VisibleAnywhere)
+	TObjectPtr<UVolumetricCloudComponent> Clouds;
+
+	UPROPERTY(VisibleAnywhere)
+	TObjectPtr<UPostProcessComponent> PostProcess;
+
+	UPROPERTY(Transient)
+	TObjectPtr<AStructuresActor> Structures;
+
+	UPROPERTY(Transient)
+	TObjectPtr<AFluidActor> Fluids;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UMaterialInterface> Ghost;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UMaterialInterface> Water;
+
 	UPROPERTY(Transient)
 	TObjectPtr<APlanetTerrainActor> Terrain;
 
@@ -98,4 +139,6 @@ private:
 	TObjectPtr<UStaticMesh> ConeMesh;
 
 	bool bBuilt = false;
+	bool bTestSite = false;
+	FTestSitePlan TestSite;
 };

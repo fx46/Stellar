@@ -2,6 +2,7 @@
 #include "Game/StellarHUD.h"
 #include "Game/StellarWorld.h"
 #include "Player/AstronautPawn.h"
+#include "Game/StellarAutomation.h"
 
 AStellarGameMode::AStellarGameMode()
 {
@@ -14,4 +15,10 @@ void AStellarGameMode::InitGame(const FString& MapName, const FString& Options, 
 	Super::InitGame(MapName, Options, ErrorMessage);
 	// Build the planet before any player spawns, so the first frame already has its ground.
 	AStellarWorld::Get(GetWorld());
+}
+
+void AStellarGameMode::StartPlay()
+{
+	Super::StartPlay();
+	AStellarAutomation::StartIfRequested(GetWorld());
 }

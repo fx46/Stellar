@@ -1,22 +1,75 @@
 #include "Terrain/TerrainEdits.h"
 #include "Terrain/PlanetField.h"
+#include "Async/ParallelFor.h"
 #include "Serialization/Archive.h"
 
-FSculptOp FSculptOp::Make(const FVector3d& Surface, const FVector3d& Inward, double Radius, double Depth)
+namespace
 {
-	FSculptOp Op;
+	/** How far beyond a carved or filled sphere the CSG keeps the density a distance (the Godot
+	 * narrow band): deeper changes are never read by a mesh. */
+	constexpr double CsgBand = 2.0;
+
+	double SmoothStep(double A, double B, double V)
+	{
+		const double T = FMath::Clamp((V - A) / (B - A), 0.0, 1.0);
+		return T * T * (3.0 - 2.0 * T);
+	}
+}
+
+// ---- ops ----
+
+FEditOp FEditOp::Sculpt(const FVector3d& Surface, const FVector3d& Inward, double Radius, double Depth)
+{
+	FEditOp Op;
+	Op.Kind = EEditKind::Sculpt;
 	Op.Center = Surface;
-	Op.Inward = Inward.GetSafeNormal();
+	Op.Normal = Inward.GetSafeNormal();
 	Op.Radius = Radius;
 	Op.Support = Radius + FMath::Abs(Depth) * 2;
 	Op.Strength = Depth;
 	return Op;
 }
 
-double FSculptOp::Weight(const FVector3d& P) const
+FEditOp FEditOp::Flatten(const FVector3d& Center, const FVector3d& Up, const FVector3d& Axis, double HalfLength, double HalfWidth,
+	double HalfHeight, double Slope, double Blend)
+{
+	FEditOp Op;
+	Op.Kind = EEditKind::Flatten;
+	Op.Center = Center;
+	const FVector3d U = Up.GetSafeNormal();
+	const FVector3d A = (Axis - U * Axis.Dot(U)).GetSafeNormal();
+	// The plane rises by Slope per metre along the axis.
+	Op.Normal = (U - A * Slope).GetSafeNormal();
+	Op.Axis = (A - Op.Normal * A.Dot(Op.Normal)).GetSafeNormal();
+	Op.HalfLength = HalfLength;
+	Op.HalfWidth = HalfWidth;
+	Op.HalfHeight = HalfHeight;
+	Op.Blend = FMath::Max(0.01, Blend);
+	return Op;
+}
+
+FEditOp FEditOp::Carve(const FVector3d& Center, double Radius)
+{
+	FEditOp Op;
+	Op.Kind = EEditKind::Carve;
+	Op.Center = Center;
+	Op.Radius = Radius;
+	return Op;
+}
+
+FEditOp FEditOp::Fill(const FVector3d& Center, double Radius)
+{
+	FEditOp Op;
+	Op.Kind = EEditKind::Fill;
+	Op.Center = Center;
+	Op.Radius = Radius;
+	return Op;
+}
+
+double FEditOp::Weight(const FVector3d& P) const
 {
 	const FVector3d Q = P - Center;
-	const double Axial = Q.Dot(Inward);
+	const double Axial = Q.Dot(Normal);
 	const double RadialSq = FMath::Max(0.0, Q.SizeSquared() - Axial * Axial);
 	const double W = FMath::Max(0.0, 1 - RadialSq / (Radius * Radius));
 	const double T = FMath::Clamp((FMath::Abs(Axial) - Support * .5) / (Support * .5), 0.0, 1.0);
@@ -26,7 +79,81 @@ double FSculptOp::Weight(const FVector3d& P) const
 	return W * W * W * (W * (W * 6 - 15) + 10) * Fade;
 }
 
-float FTerrainEdits::FSampler::At(int32 I, int32 J, int32 K) const
+double FEditOp::Apply(double D, const FVector3d& P) const
+{
+	switch (Kind)
+	{
+	case EEditKind::Sculpt:
+	{
+		const double W = Weight(P);
+		return W > 0 ? D + Strength * W : D;
+	}
+	case EEditKind::Flatten:
+	{
+		const FVector3d Q = P - Center;
+		const double H = Q.Dot(Normal);
+		if (FMath::Abs(H) >= HalfHeight)
+			return D;
+		const FVector3d Side = Normal.Cross(Axis);
+		const double A = FMath::Abs(Q.Dot(Axis)), S = FMath::Abs(Q.Dot(Side));
+		// Narrow band: deep rock that stays rock and open air that stays air keep their values
+		// (no mesh reads them), so grading stores only bricks near the old or new surface.
+		if (FMath::Min(FMath::Abs(D), FMath::Abs(H)) > CsgBand + 1 && (D < 0) == (H < 0))
+			return D;
+		const double W = (1 - SmoothStep(HalfLength - Blend, HalfLength, A)) * (1 - SmoothStep(HalfWidth - Blend, HalfWidth, S))
+			* (1 - SmoothStep(HalfHeight * 0.6, HalfHeight, FMath::Abs(H)));
+		return W > 0 ? D + W * (H - D) : D;
+	}
+	case EEditKind::Carve:
+	{
+		const double B = FVector3d::Dist(P, Center) - Radius;
+		return B > CsgBand ? D : FMath::Max(D, -B);
+	}
+	case EEditKind::Fill:
+	{
+		const double B = FVector3d::Dist(P, Center) - Radius;
+		return B > CsgBand ? D : FMath::Min(D, B);
+	}
+	}
+	return D;
+}
+
+FBox3d FEditOp::Bounds() const
+{
+	switch (Kind)
+	{
+	case EEditKind::Sculpt:
+		return FBox3d(Center, Center).ExpandBy(FMath::Sqrt(Radius * Radius + Support * Support));
+	case EEditKind::Flatten:
+	{
+		const FVector3d Side = Normal.Cross(Axis);
+		const FVector3d Extent = (Axis * HalfLength).GetAbs() + (Side * HalfWidth).GetAbs() + (Normal * HalfHeight).GetAbs();
+		return FBox3d(Center - Extent, Center + Extent);
+	}
+	default:
+		return FBox3d(Center, Center).ExpandBy(Radius + CsgBand);
+	}
+}
+
+void FEditOp::Serialize(FArchive& Ar)
+{
+	uint8 K = uint8(Kind);
+	Ar << K;
+	Kind = EEditKind(K);
+	Ar << Center << Normal << Axis << Radius << Support << Strength << HalfLength << HalfWidth << HalfHeight << Blend;
+}
+
+bool FEditBrick::IsEmpty() const
+{
+	for (int32 I = 0; I < Count; I++)
+		if (Delta[I] != 0.f || Material[I] != 0)
+			return false;
+	return true;
+}
+
+// ---- sampling ----
+
+const FEditBrick* FTerrainEdits::FSampler::Brick(int32 I, int32 J, int32 K) const
 {
 	const FIntVector Key(I >> FEditBrick::Bits, J >> FEditBrick::Bits, K >> FEditBrick::Bits);
 	if (Key != LastKey)
@@ -35,10 +162,16 @@ float FTerrainEdits::FSampler::At(int32 I, int32 J, int32 K) const
 		const TSharedRef<FEditBrick>* Found = Edits->Bricks.Find(Key);
 		Last = Found != nullptr ? &Found->Get() : nullptr;
 	}
-	if (Last == nullptr)
+	return Last;
+}
+
+float FTerrainEdits::FSampler::At(int32 I, int32 J, int32 K) const
+{
+	const FEditBrick* B = Brick(I, J, K);
+	if (B == nullptr)
 		return 0.f;
 	constexpr int32 M = FEditBrick::Size - 1;
-	return Last->Delta[FEditBrick::Index(I & M, J & M, K & M)];
+	return B->Delta[FEditBrick::Index(I & M, J & M, K & M)];
 }
 
 float FTerrainEdits::FSampler::Delta(double X, double Y, double Z) const
@@ -63,6 +196,16 @@ float FTerrainEdits::FSampler::Delta(double X, double Y, double Z) const
 float FTerrainEdits::Delta(double X, double Y, double Z) const
 {
 	return FSampler(this).Delta(X, Y, Z);
+}
+
+EEditMaterial FTerrainEdits::MaterialAt(const FVector3d& P) const
+{
+	if (Bricks.Num() == 0)
+		return EEditMaterial::Natural;
+	const int32 I = int32(FMath::RoundToDouble(P.X / Spacing)), J = int32(FMath::RoundToDouble(P.Y / Spacing)), K = int32(FMath::RoundToDouble(P.Z / Spacing));
+	const FEditBrick* B = FSampler(this).Brick(I, J, K);
+	constexpr int32 M = FEditBrick::Size - 1;
+	return B != nullptr ? EEditMaterial(B->Material[FEditBrick::Index(I & M, J & M, K & M)]) : EEditMaterial::Natural;
 }
 
 FBox3d FTerrainEdits::BrickBox(const FIntVector& Key) const
@@ -121,73 +264,162 @@ uint32 FTerrainEdits::VersionIn(const FBox3d& Box) const
 	return V;
 }
 
-TSharedRef<const FTerrainEdits> FTerrainEdits::Apply(const FSculptOp& Op, const FPlanetField& Field, FEditResult& Result) const
+// ---- editing ----
+
+TSharedRef<const FTerrainEdits> FTerrainEdits::Apply(const FEditOp& Op, const FPlanetField& Field, FEditResult& Result) const
+{
+	return ApplyAll(MakeArrayView(&Op, 1), Field, Result);
+}
+
+TSharedRef<const FTerrainEdits> FTerrainEdits::ApplyAll(TConstArrayView<FEditOp> Ops, const FPlanetField& Field, FEditResult& Result) const
 {
 	TSharedRef<FTerrainEdits> Next = MakeShared<FTerrainEdits>(Spacing);
 	Next->Bricks = Bricks;
 	Next->Version = Version + 1;
+	TSet<FIntVector> Owned;
+	for (const FEditOp& Op : Ops)
+		Next->ApplyInPlace(Op, Field, Result, Owned);
+	if (Result.bChanged)
+		Result.Changed = Result.Changed.ExpandBy(Spacing);
+	return Next;
+}
 
+void FTerrainEdits::ApplyInPlace(const FEditOp& Op, const FPlanetField& Field, FEditResult& Result, TSet<FIntVector>& Owned)
+{
 	const double H = Spacing;
-	const double Reach = Op.Reach() + H;
-	const FIntVector Lo(int32(FMath::FloorToDouble((Op.Center.X - Reach) / H)), int32(FMath::FloorToDouble((Op.Center.Y - Reach) / H)),
-		int32(FMath::FloorToDouble((Op.Center.Z - Reach) / H)));
-	const FIntVector Hi(int32(FMath::CeilToDouble((Op.Center.X + Reach) / H)), int32(FMath::CeilToDouble((Op.Center.Y + Reach) / H)),
-		int32(FMath::CeilToDouble((Op.Center.Z + Reach) / H)));
+	const FBox3d Box = Op.Bounds().ExpandBy(H);
+	const FIntVector Lo(int32(FMath::FloorToDouble(Box.Min.X / H)), int32(FMath::FloorToDouble(Box.Min.Y / H)), int32(FMath::FloorToDouble(Box.Min.Z / H)));
+	const FIntVector Hi(int32(FMath::CeilToDouble(Box.Max.X / H)), int32(FMath::CeilToDouble(Box.Max.Y / H)), int32(FMath::CeilToDouble(Box.Max.Z / H)));
 
-	TSet<FIntVector> Cloned;
-	constexpr int32 M = FEditBrick::Size - 1;
-	const double Cell = H * H * H;
-	for (int32 I = Lo.X; I <= Hi.X; I++)
-		for (int32 J = Lo.Y; J <= Hi.Y; J++)
-			for (int32 K = Lo.Z; K <= Hi.Z; K++)
+	// Phase 1 (serial): every brick the op's box reaches, made writable - fresh, or a copy of the
+	// shared one (once per snapshot).
+	struct FTarget
+	{
+		FIntVector Key;
+		TSharedPtr<FEditBrick> Original; // the shared brick, kept if the op leaves it unchanged
+		FEditBrick* Brick = nullptr;
+		bool bFresh = false;
+		// Results, merged afterwards.
+		bool bChanged = false;
+		double Volume[int32(EGeoMaterial::Count)] = {};
+		FBox3d Changed = FBox3d(ForceInit);
+	};
+	TArray<FTarget> Targets;
+	for (int32 Bx = Lo.X >> FEditBrick::Bits; Bx <= Hi.X >> FEditBrick::Bits; Bx++)
+		for (int32 By = Lo.Y >> FEditBrick::Bits; By <= Hi.Y >> FEditBrick::Bits; By++)
+			for (int32 Bz = Lo.Z >> FEditBrick::Bits; Bz <= Hi.Z >> FEditBrick::Bits; Bz++)
 			{
-				const FVector3d P(I * H, J * H, K * H);
-				const double W = Op.Weight(P);
-				if (W <= 0.0)
-					continue;
-				const float Change = float(Op.Strength * W);
-				if (Change == 0.f)
-					continue;
-				const FIntVector Key(I >> FEditBrick::Bits, J >> FEditBrick::Bits, K >> FEditBrick::Bits);
-				TSharedRef<FEditBrick>* Slot = Next->Bricks.Find(Key);
+				FTarget T;
+				T.Key = FIntVector(Bx, By, Bz);
+				TSharedRef<FEditBrick>* Slot = Bricks.Find(T.Key);
 				if (Slot == nullptr)
 				{
 					TSharedRef<FEditBrick> Fresh = MakeShared<FEditBrick>();
 					FMemory::Memzero(Fresh->Delta, sizeof(Fresh->Delta));
-					Slot = &Next->Bricks.Add(Key, Fresh);
-					Cloned.Add(Key);
+					FMemory::Memzero(Fresh->Material, sizeof(Fresh->Material));
+					Slot = &Bricks.Add(T.Key, Fresh);
+					Owned.Add(T.Key);
+					T.bFresh = true;
 				}
-				else if (!Cloned.Contains(Key))
+				else if (!Owned.Contains(T.Key))
 				{
+					T.Original = Slot->ToSharedPtr();
 					*Slot = MakeShared<FEditBrick>(Slot->Get());
-					Cloned.Add(Key);
+					Owned.Add(T.Key);
 				}
-				FEditBrick& Brick = Slot->Get();
-				Brick.Version = Next->Version;
-				float& Value = Brick.Delta[FEditBrick::Index(I & M, J & M, K & M)];
-
-				// Removed volume: each lattice point stands for a cell, rock in proportion to how
-				// far inside the surface it is (within half a cell).
-				const double Proc = Field.Density(P);
-				const double Before = FMath::Clamp(0.5 - (Proc + Value) / H, 0.0, 1.0);
-				Value += Change;
-				const double After = FMath::Clamp(0.5 - (Proc + Value) / H, 0.0, 1.0);
-				if (Before != After)
-				{
-					const FGeoSample Geo = Field.Geology(P, -Proc);
-					Result.Volume[int32(Geo.Material)] += (Before - After) * Cell;
-				}
-				Result.Changed += P;
-				Result.bChanged = true;
+				T.Brick = &Slot->Get();
+				Targets.Add(MoveTemp(T));
 			}
-	if (Result.bChanged)
-		Result.Changed = Result.Changed.ExpandBy(H);
-	return Next;
+
+	// Phase 2 (parallel): each brick's points in the box. Each lattice point stands for a cell;
+	// its rock is in proportion to how far inside the surface it is (within half a cell), which
+	// is what the removed volume counts.
+	const uint32 NewVersion = Version;
+	const double Cell = H * H * H;
+	ParallelFor(Targets.Num(), [&](int32 Index)
+	{
+		FTarget& T = Targets[Index];
+		FEditBrick& B = *T.Brick;
+		const FIntVector Base = T.Key * FEditBrick::Size;
+		for (int32 Lx = 0; Lx < FEditBrick::Size; Lx++)
+		{
+			const int32 I = Base.X + Lx;
+			if (I < Lo.X || I > Hi.X)
+				continue;
+			for (int32 Ly = 0; Ly < FEditBrick::Size; Ly++)
+			{
+				const int32 J = Base.Y + Ly;
+				if (J < Lo.Y || J > Hi.Y)
+					continue;
+				for (int32 Lz = 0; Lz < FEditBrick::Size; Lz++)
+				{
+					const int32 K = Base.Z + Lz;
+					if (K < Lo.Z || K > Hi.Z)
+						continue;
+					const FVector3d P(I * H, J * H, K * H);
+					// Cheap rejection before the procedural field is evaluated.
+					if (Op.Kind == EEditKind::Sculpt && Op.Weight(P) <= 0)
+						continue;
+					if ((Op.Kind == EEditKind::Carve || Op.Kind == EEditKind::Fill) && FVector3d::Dist(P, Op.Center) > Op.Radius + CsgBand)
+						continue;
+					const int32 At = FEditBrick::Index(Lx, Ly, Lz);
+					const double Proc = Field.Density(P);
+					const double Old = Proc + B.Delta[At];
+					const float NewDelta = float(Op.Apply(Old, P) - Proc);
+					if (NewDelta == B.Delta[At])
+						continue;
+					const double New = Proc + NewDelta;
+					const double Before = FMath::Clamp(0.5 - Old / H, 0.0, 1.0);
+					const double After = FMath::Clamp(0.5 - New / H, 0.0, 1.0);
+					if (Before != After)
+					{
+						const EGeoMaterial M = B.Material[At] == uint8(EEditMaterial::Fill) || After > Before ? EGeoMaterial::Fill
+							: Field.Geology(P, -Proc).Material;
+						T.Volume[int32(M)] += (Before - After) * Cell;
+					}
+					// Ground that turns to rock by building is fill; ground cut open is what it was.
+					if (New < 0 && Old >= 0)
+						B.Material[At] = uint8(EEditMaterial::Fill);
+					else if (New >= 0 && Old < 0)
+						B.Material[At] = uint8(EEditMaterial::Natural);
+					B.Delta[At] = NewDelta;
+					T.bChanged = true;
+					T.Changed += P;
+				}
+			}
+		}
+	});
+
+	// Phase 3 (serial): merge, drop bricks that hold nothing, keep originals the op left alone.
+	for (FTarget& T : Targets)
+	{
+		if (T.bChanged)
+		{
+			T.Brick->Version = NewVersion;
+			for (int32 M = 0; M < int32(EGeoMaterial::Count); M++)
+				Result.Volume[M] += T.Volume[M];
+			Result.Changed += T.Changed;
+			Result.bChanged = true;
+		}
+		if (T.bFresh && (!T.bChanged || T.Brick->IsEmpty()))
+		{
+			Bricks.Remove(T.Key);
+			Owned.Remove(T.Key);
+		}
+		else if (!T.bChanged && T.Original.IsValid())
+		{
+			Bricks.Add(T.Key, T.Original.ToSharedRef());
+			Owned.Remove(T.Key);
+		}
+	}
 }
 
 void FTerrainEdits::Serialize(FArchive& Ar)
 {
-	int32 FileVersion = 1;
+	// Version 2: a channel mask per brick (1 density offset, 2 material). Version 1 bricks held
+	// the offset only.
+	enum : uint8 { ChannelDelta = 1, ChannelMaterial = 2 };
+	int32 FileVersion = 2;
 	Ar << FileVersion;
 	Ar << Spacing;
 	Ar << Version;
@@ -201,8 +433,16 @@ void FTerrainEdits::Serialize(FArchive& Ar)
 			FIntVector Key;
 			Ar << Key;
 			TSharedRef<FEditBrick> Brick = MakeShared<FEditBrick>();
+			FMemory::Memzero(Brick->Delta, sizeof(Brick->Delta));
+			FMemory::Memzero(Brick->Material, sizeof(Brick->Material));
 			Ar << Brick->Version;
-			Ar.Serialize(Brick->Delta, sizeof(Brick->Delta));
+			uint8 Channels = ChannelDelta;
+			if (FileVersion >= 2)
+				Ar << Channels;
+			if (Channels & ChannelDelta)
+				Ar.Serialize(Brick->Delta, sizeof(Brick->Delta));
+			if (Channels & ChannelMaterial)
+				Ar.Serialize(Brick->Material, sizeof(Brick->Material));
 			Bricks.Add(Key, Brick);
 		}
 	}
@@ -210,9 +450,20 @@ void FTerrainEdits::Serialize(FArchive& Ar)
 	{
 		for (TPair<FIntVector, TSharedRef<FEditBrick>>& Pair : Bricks)
 		{
+			FEditBrick& B = Pair.Value.Get();
+			uint8 Channels = ChannelDelta;
+			for (int32 I = 0; I < FEditBrick::Count; I++)
+				if (B.Material[I] != 0)
+				{
+					Channels |= ChannelMaterial;
+					break;
+				}
 			Ar << Pair.Key;
-			Ar << Pair.Value->Version;
-			Ar.Serialize(Pair.Value->Delta, sizeof(Pair.Value->Delta));
+			Ar << B.Version;
+			Ar << Channels;
+			Ar.Serialize(B.Delta, sizeof(B.Delta));
+			if (Channels & ChannelMaterial)
+				Ar.Serialize(B.Material, sizeof(B.Material));
 		}
 	}
 }

@@ -101,6 +101,23 @@ double FPlanetField::Height(double Ux, double Uy, double Uz) const
 	return Layers(Ux * Radius, Uy * Radius, Uz * Radius).Total();
 }
 
+namespace
+{
+	/** A valley's cross-section from |v| (distance to the valley's centre line in noise units):
+	 * 1 on a flat floor, smooth walls, 0 beyond the rim. Decreasing in |v|. */
+	double ValleyProfile(double AbsV) { return 1.0 - SmoothStep(0.015, 0.07, AbsV); }
+
+	/** |v| over an interval of v. */
+	FRange Abs(FRange V)
+	{
+		const double Lo = V.Lo <= 0 && V.Hi >= 0 ? 0 : FMath::Min(FMath::Abs(V.Lo), FMath::Abs(V.Hi));
+		return { Lo, FMath::Max(FMath::Abs(V.Lo), FMath::Abs(V.Hi)) };
+	}
+
+	/** An increasing function over an interval. */
+	template <typename Fn> FRange Up(FRange V, Fn&& F) { return { F(V.Lo), F(V.Hi) }; }
+}
+
 FHeightLayers FPlanetField::Layers(double X, double Y, double Z) const
 {
 	FHeightLayers L;
@@ -112,15 +129,31 @@ FHeightLayers FPlanetField::Layers(double X, double Y, double Z) const
 	// between plateau and plain.
 	const double E = Fbm(X, Y, Z, 1.0 / 25000, 3, 1);
 	L.Escarp = 450 * SmoothStep(0.10, 0.16, E);
+	// Valleys: where a 9 km field crosses zero, a flat floor ~200 m wide inside walls ~800 m
+	// apart. They cut through ranges (taking most of the mountain away: passes), and through the
+	// plain as 60 m canyons - routes between regions.
+	L.Valley = ValleyProfile(FMath::Abs(Fbm(X, Y, Z, 1.0 / 9000, 3, 7)));
 	// Mountain ranges: ridged crests where a 45 km mask is high; squared so ranges rise out
 	// of the plain with sharp tops.
 	L.RangeMask = SmoothStep(0.02, 0.32, Fbm(X, Y, Z, 1.0 / 45000, 3, 2));
 	const double Ridge = L.RangeMask > 0 ? Ridged(X, Y, Z, 1.0 / 14000, 6, 3) : 0;
-	L.Mountains = L.RangeMask * Ridge * Ridge * 3900;
-	// Hills, stronger in the ranges' foothills.
-	L.Hills = Fbm(X, Y, Z, 1.0 / 2600, 3, 4) * 140 * (0.35 + 0.65 * L.RangeMask);
-	// Ground detail: what you walk over.
+	L.Mountains = L.RangeMask * Ridge * Ridge * 3900 * (1 - 0.8 * L.Valley);
+	L.ValleyCut = -60 * L.Valley * (0.4 + 0.6 * L.RangeMask);
+	// Hills, stronger in the ranges' foothills, softened in valleys.
+	L.Hills = Fbm(X, Y, Z, 1.0 / 2600, 3, 4) * 140 * (0.35 + 0.65 * L.RangeMask) * (1 - 0.6 * L.Valley);
+	// Landmarks, rare by construction (high thresholds on smooth fields): flat-topped mesas a
+	// few kilometres across with ~60 degree cliffs, and fields of needle spires.
+	L.Mesa = 450 * SmoothStep(0.60, 0.64, Fbm(X, Y, Z, 1.0 / 9000, 2, 11));
+	L.Spire = 260 * SmoothStep(0.70, 0.80, Noise.Sample(X * (1.0 / 1600), Y * (1.0 / 1600), Z * (1.0 / 1600), 12 * 16))
+		* SmoothStep(0.55, 0.75, Noise.Sample(X * (1.0 / 30000), Y * (1.0 / 30000), Z * (1.0 / 30000), 13 * 16));
+	// Rock outcrops, clustered in some regions and kept off valley floors: 15 m tors with steep
+	// sides, tens of metres across.
+	const double Cluster = SmoothStep(0.05, 0.35, Fbm(X, Y, Z, 1.0 / 6000, 2, 8));
+	const double Tor = SmoothStep(0.30, 0.50, Fbm(X, Y, Z, 1.0 / 150, 2, 9));
+	L.Outcrop = 16 * Cluster * Tor * Tor * (1 - L.Valley);
+	// Ground detail: what you walk over, down to a roughness the 0.25 m cells resolve.
 	L.Detail = Fbm(X, Y, Z, 1.0 / 140, 3, 5) * 3.0 + Fbm(X, Y, Z, 1.0 / 19, 2, 6) * 0.45;
+	L.Fine = Fbm(X, Y, Z, 1.0 / 4.5, 2, 10) * 0.12;
 	return L;
 }
 
@@ -131,17 +164,30 @@ FRange FPlanetField::HeightRange(double X, double Y, double Z, double Reach) con
 	const FRange C = FbmRange(X, Y, Z, 1.0 / 70000, 4, 0, Reach);
 	const FRange Basin = Scale(BasinShape(C), 700);
 	const FRange E = FbmRange(X, Y, Z, 1.0 / 25000, 3, 1, Reach);
-	const FRange Escarp = { 450 * SmoothStep(0.10, 0.16, E.Lo), 450 * SmoothStep(0.10, 0.16, E.Hi) };
+	const FRange Escarp = Up(E, [](double V) { return 450 * SmoothStep(0.10, 0.16, V); });
+	const FRange AbsV = Abs(FbmRange(X, Y, Z, 1.0 / 9000, 3, 7, Reach));
+	const FRange Valley = { ValleyProfile(AbsV.Hi), ValleyProfile(AbsV.Lo) };
 	const FRange M = FbmRange(X, Y, Z, 1.0 / 45000, 3, 2, Reach);
-	const FRange Mask = { SmoothStep(0.02, 0.32, M.Lo), SmoothStep(0.02, 0.32, M.Hi) };
+	const FRange Mask = Up(M, [](double V) { return SmoothStep(0.02, 0.32, V); });
 	const FRange Ridge = Mask.Hi > 0 ? RidgedRange(X, Y, Z, 1.0 / 14000, 6, 3, Reach) : FRange{ 0.0, 0.0 };
-	const FRange Mountains = { Mask.Lo * Ridge.Lo * Ridge.Lo * 3900, Mask.Hi * Ridge.Hi * Ridge.Hi * 3900 };
-	const FRange Hills = Scale(Product(FbmRange(X, Y, Z, 1.0 / 2600, 3, 4, Reach), { 0.35 + 0.65 * Mask.Lo, 0.35 + 0.65 * Mask.Hi }), 140);
+	// Every factor here is non-negative, so bounds multiply.
+	const FRange Mountains = { Mask.Lo * Ridge.Lo * Ridge.Lo * 3900 * (1 - 0.8 * Valley.Hi), Mask.Hi * Ridge.Hi * Ridge.Hi * 3900 * (1 - 0.8 * Valley.Lo) };
+	const FRange ValleyCut = { -60 * Valley.Hi * (0.4 + 0.6 * Mask.Hi), -60 * Valley.Lo * (0.4 + 0.6 * Mask.Lo) };
+	const FRange HillShape = Product(FbmRange(X, Y, Z, 1.0 / 2600, 3, 4, Reach), { 0.35 + 0.65 * Mask.Lo, 0.35 + 0.65 * Mask.Hi });
+	const FRange Hills = Scale(Product(HillShape, { 1 - 0.6 * Valley.Hi, 1 - 0.6 * Valley.Lo }), 140);
+	const FRange Mesa = Up(FbmRange(X, Y, Z, 1.0 / 9000, 2, 11, Reach), [](double V) { return 450 * SmoothStep(0.60, 0.64, V); });
+	const FRange SpireA = Up(OctaveRange(X, Y, Z, 1.0 / 1600, 12 * 16, Reach), [](double V) { return SmoothStep(0.70, 0.80, V); });
+	const FRange SpireB = Up(OctaveRange(X, Y, Z, 1.0 / 30000, 13 * 16, Reach), [](double V) { return SmoothStep(0.55, 0.75, V); });
+	const FRange Spire = { 260 * SpireA.Lo * SpireB.Lo, 260 * SpireA.Hi * SpireB.Hi };
+	const FRange Cluster = Up(FbmRange(X, Y, Z, 1.0 / 6000, 2, 8, Reach), [](double V) { return SmoothStep(0.05, 0.35, V); });
+	const FRange Tor = Up(FbmRange(X, Y, Z, 1.0 / 150, 2, 9, Reach), [](double V) { return SmoothStep(0.30, 0.50, V); });
+	const FRange Outcrop = { 16 * Cluster.Lo * Tor.Lo * Tor.Lo * (1 - Valley.Hi), 16 * Cluster.Hi * Tor.Hi * Tor.Hi * (1 - Valley.Lo) };
 	const FRange D1 = Scale(FbmRange(X, Y, Z, 1.0 / 140, 3, 5, Reach), 3.0);
 	const FRange D2 = Scale(FbmRange(X, Y, Z, 1.0 / 19, 2, 6, Reach), 0.45);
+	const FRange Fine = Scale(FbmRange(X, Y, Z, 1.0 / 4.5, 2, 10, Reach), 0.12);
 	// A millimetre for rounding: the exact sum is computed in another order.
-	return { Basin.Lo + Escarp.Lo + Mountains.Lo + Hills.Lo + D1.Lo + D2.Lo - 1e-3,
-	         Basin.Hi + Escarp.Hi + Mountains.Hi + Hills.Hi + D1.Hi + D2.Hi + 1e-3 };
+	return { Basin.Lo + Escarp.Lo + Mountains.Lo + ValleyCut.Lo + Hills.Lo + Mesa.Lo + Spire.Lo + Outcrop.Lo + D1.Lo + D2.Lo + Fine.Lo - 1e-3,
+	         Basin.Hi + Escarp.Hi + Mountains.Hi + ValleyCut.Hi + Hills.Hi + Mesa.Hi + Spire.Hi + Outcrop.Hi + D1.Hi + D2.Hi + Fine.Hi + 1e-3 };
 }
 
 FRange FPlanetField::OctaveRange(double X, double Y, double Z, double Freq, int32 Index, double Reach) const
@@ -240,8 +286,19 @@ double FPlanetField::Ridged(double X, double Y, double Z, double Freq, int32 Oct
 
 // ---- geology ----
 
+const FDeposit* FPlanetField::DepositAt(const FVector3d& P) const
+{
+	for (const FDeposit& D : Deposits)
+		if (FVector3d::DistSquared(P, D.Center) < D.Radius * D.Radius)
+			return &D;
+	return nullptr;
+}
+
 FGeoSample FPlanetField::Geology(const FVector3d& P, double Depth) const
 {
+	if (Deposits.Num() > 0 && Depth > 0.4)
+		if (const FDeposit* D = DepositAt(P))
+			return { D->Material, D->Material == EGeoMaterial::CopperOre ? 1.6f : 1.4f };
 	// Noise layers 40+ are reserved for geology (the height uses 0-6 * 16 + octave).
 	const double Regolith = 0.7 + 0.5 * Noise.Sample(P.X / 7.0, P.Y / 7.0, P.Z / 7.0, 40);
 	if (Depth < Regolith)
@@ -276,6 +333,7 @@ FLinearColor FPlanetField::MaterialColor(EGeoMaterial Material, const FVector3d&
 	static const FLinearColor Copper = FLinearColor::FromSRGBColor(FColor(36, 104, 86));
 	static const FLinearColor Quartz = FLinearColor::FromSRGBColor(FColor(214, 212, 204));
 	static const FLinearColor Regolith = FLinearColor::FromSRGBColor(FColor(120, 84, 56));
+	static const FLinearColor Fill = FLinearColor::FromSRGBColor(FColor(118, 104, 90));
 	switch (Material)
 	{
 	case EGeoMaterial::Sandstone:
@@ -289,6 +347,7 @@ FLinearColor FPlanetField::MaterialColor(EGeoMaterial Material, const FVector3d&
 	case EGeoMaterial::IronOre: return Iron;
 	case EGeoMaterial::CopperOre: return Copper;
 	case EGeoMaterial::Quartz: return Quartz;
+	case EGeoMaterial::Fill: return Fill;
 	default: return Regolith;
 	}
 }
@@ -318,6 +377,7 @@ const TCHAR* FPlanetField::MaterialName(EGeoMaterial Material)
 	case EGeoMaterial::IronOre: return TEXT("Iron ore");
 	case EGeoMaterial::CopperOre: return TEXT("Copper ore");
 	case EGeoMaterial::Quartz: return TEXT("Quartz");
+	case EGeoMaterial::Fill: return TEXT("Fill");
 	default: return TEXT("?");
 	}
 }

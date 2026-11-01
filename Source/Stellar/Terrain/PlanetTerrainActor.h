@@ -16,7 +16,12 @@ struct FNodeMeshData
 	TArray<FVector> Normals;
 	TArray<FColor> Colors;
 	TArray<int32> Triangles;
+	/** Planet-frame position (metres) wrapped to a 4096 m period - what the material's detail
+	 * noise reads, precise anywhere on the planet: UV0 = x, y; UV1 = z. */
+	TArray<FVector2D> UV0, UV1;
 };
+
+DECLARE_MULTICAST_DELEGATE_OneParam(FOnTerrainEdited, const FEditResult&);
 
 /**
  * The planet in the world: streams the level-of-detail cut around the camera onto procedural
@@ -63,6 +68,8 @@ public:
 
 	bool IsInitialized() const { return Terrain.IsValid(); }
 	const FPlanetTerrain& GetTerrain() const { return *Terrain; }
+	/** For setup only (deposits), before any meshing job runs. */
+	FPlanetTerrain& MutableTerrain() { return *Terrain; }
 	const FTerrainEdits* GetEdits() const { return &Edits.Get(); }
 	TSharedRef<const FTerrainEdits> GetEditsSnapshot() const { return Edits; }
 
@@ -79,8 +86,14 @@ public:
 	FVector3d Normal(const FVector3d& P) const { return Terrain->Normal(P, &Edits.Get()); }
 
 	/** Start an edit unless one is still being computed. OnDone runs on the game thread. */
-	bool RequestEdit(const FSculptOp& Op, TFunction<void(const FEditResult&)> OnDone);
+	bool RequestEdit(const FEditOp& Op, TFunction<void(const FEditResult&)> OnDone);
 	bool IsEditPending() const { return EditJob.IsValid(); }
+
+	/** Apply edits immediately on the game thread (scenario setup). Waits for running jobs. */
+	FEditResult ApplyNow(TConstArrayView<FEditOp> Ops);
+
+	/** Every applied edit, after the terrain changed (fluids, structures listen). */
+	FOnTerrainEdited OnEdited;
 
 	/** Replace the edits (loading a save). Remeshes whatever they reach. */
 	void SetEdits(TSharedRef<const FTerrainEdits> NewEdits);
@@ -95,6 +108,8 @@ public:
 	double LastMeshMs() const { return MeshMs; }
 	int32 LastMeshedNodes() const { return MeshedNodes; }
 	bool IsJobRunning() const { return Job.IsValid(); }
+	/** No job running, no edit pending, and the newest edits meshed. */
+	bool IsUpToDate() const { return !Job.IsValid() && !EditJob.IsValid() && AppliedEditVersion == Edits->GetVersion(); }
 
 	virtual void Tick(float DeltaSeconds) override;
 	virtual bool ShouldTickIfViewportsOnly() const override { return true; }

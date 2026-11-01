@@ -32,11 +32,21 @@ struct FRange
 	double Hi = 0.0;
 };
 
-/** The planet's height layers at one surface point: what colouring and site picking read. */
+/**
+ * The planet's height layers at one surface point: what colouring and site picking read.
+ * Authored at fixed metre sizes, from tens of kilometres to tens of centimetres (milestone 0
+ * step 3): basins and plains, escarpments, mountain ranges cut by traversable valleys, sparse
+ * mesas and spire fields as landmarks, hills, rock outcrops, ground detail and fine roughness.
+ */
 struct FHeightLayers
 {
 	double Basin = 0, Escarp = 0, RangeMask = 0, Mountains = 0, Hills = 0, Detail = 0;
-	double Total() const { return Basin + Escarp + Mountains + Hills + Detail; }
+	/** 1 on a valley floor, falling to 0 on its rim. */
+	double Valley = 0;
+	/** The valley's own cut (negative), on top of what it removes from mountains and hills. */
+	double ValleyCut = 0;
+	double Outcrop = 0, Mesa = 0, Spire = 0, Fine = 0;
+	double Total() const { return Basin + Escarp + Mountains + Hills + Detail + ValleyCut + Outcrop + Mesa + Spire + Fine; }
 };
 
 /** Rock types the terrain is made of (milestone 0 step 3: a first material-layer model). */
@@ -48,7 +58,18 @@ enum class EGeoMaterial : uint8
 	IronOre,
 	CopperOre,
 	Quartz,
+	/** Ground raised by building or grading (from the edits' material channel). */
+	Fill,
 	Count
+};
+
+/** An authored ore body (a test scenario's deposit): replaces the host rock within Radius. */
+struct FDeposit
+{
+	FVector3d Center = FVector3d::ZeroVector;
+	double Radius = 5;
+	EGeoMaterial Material = EGeoMaterial::IronOre;
+	FString Name;
 };
 
 /** What a point under the ground is made of. */
@@ -80,7 +101,7 @@ class STELLAR_API FPlanetField
 public:
 	/** Bounds of Height over the whole planet (metres). */
 	static constexpr double MinHeight = -1100.0;
-	static constexpr double MaxHeight = 5500.0;
+	static constexpr double MaxHeight = 6000.0;
 
 	FPlanetField(double InRadius, int32 InSeed = 1337);
 
@@ -122,6 +143,13 @@ public:
 
 	static const TCHAR* MaterialName(EGeoMaterial Material);
 
+	/** Authored deposits, consulted before the procedural geology. Set once, before any thread
+	 * reads the field. */
+	void SetDeposits(TArray<FDeposit> InDeposits) { Deposits = MoveTemp(InDeposits); }
+	const TArray<FDeposit>& GetDeposits() const { return Deposits; }
+	/** The deposit containing P, if any. */
+	const FDeposit* DepositAt(const FVector3d& P) const;
+
 private:
 	double Fbm(double X, double Y, double Z, double Freq, int32 Octaves, int32 Layer) const;
 	double Ridged(double X, double Y, double Z, double Freq, int32 Octaves, int32 Layer) const;
@@ -132,4 +160,5 @@ private:
 	double Radius;
 	int32 Seed;
 	FPerlin Noise;
+	TArray<FDeposit> Deposits;
 };

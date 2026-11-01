@@ -2,8 +2,11 @@
 #include "Stellar.h"
 #include "Player/SculptBrush.h"
 #include "Game/StellarWorld.h"
+#include "Game/Structures.h"
 #include "Terrain/PlanetTerrainActor.h"
+#include "Terrain/FluidActor.h"
 #include "Camera/CameraComponent.h"
+#include "Components/SpotLightComponent.h"
 #include "ProceduralMeshComponent.h"
 #include "GameFramework/PlayerController.h"
 #include "Engine/World.h"
@@ -12,17 +15,20 @@
 #include "HAL/FileManager.h"
 #include "Serialization/BufferArchive.h"
 #include "Serialization/MemoryReader.h"
-#include "Misc/CommandLine.h"
-#include "Misc/Parse.h"
-#include "UnrealClient.h"
-#include "Kismet/KismetSystemLibrary.h"
+#include "Misc/Compression.h"
 
 namespace
 {
 	constexpr double MotionHz = 120.0;
 	constexpr double EyeOffset = 0.7; // capsule centre to eye (feet are Radius below the centre)
 	constexpr uint32 SaveMagic = 0x524C5453; // "STLR"
-	constexpr int32 SaveVersion = 1;
+	/** Version 2: tagged sections (so systems can be added without breaking older saves), the
+	 * whole body compressed. */
+	constexpr int32 SaveVersion = 2;
+	/** How far a structure can be placed from the astronaut in the walking view. */
+	constexpr double BuildReach = 16.0;
+
+	constexpr uint32 Tag(const char (&S)[5]) { return uint32(S[0]) | uint32(S[1]) << 8 | uint32(S[2]) << 16 | uint32(S[3]) << 24; }
 
 	double Axis(const APlayerController* PC, const FKey& Plus, const FKey& Minus)
 	{
@@ -56,6 +62,18 @@ AAstronautPawn::AAstronautPawn()
 	Camera->bUsePawnControlRotation = false;
 	RootComponent = Camera;
 
+	// The helmet lamp: caves and cuts in shadow are really dark.
+	Lamp = CreateDefaultSubobject<USpotLightComponent>(TEXT("HelmetLamp"));
+	Lamp->SetupAttachment(Camera);
+	Lamp->SetRelativeLocation(FVector(10, 0, 15));
+	Lamp->SetIntensityUnits(ELightUnits::Lumens);
+	Lamp->SetIntensity(1800.f);
+	Lamp->SetAttenuationRadius(5000.f);
+	Lamp->SetInnerConeAngle(14.f);
+	Lamp->SetOuterConeAngle(34.f);
+	Lamp->SetLightColor(FLinearColor(1.f, 0.95f, 0.88f));
+	Lamp->SetVisibility(false);
+
 	Cursor = CreateDefaultSubobject<UProceduralMeshComponent>(TEXT("BrushCursor"));
 	Cursor->SetupAttachment(Camera);
 	Cursor->SetUsingAbsoluteLocation(true);
@@ -75,12 +93,6 @@ void AAstronautPawn::BeginPlay()
 		PC->bShowMouseCursor = false;
 	}
 	PlaceAtSite();
-	if (FParse::Value(FCommandLine::Get(), TEXT("-shots="), ShotsDir))
-	{
-		Shot = 0;
-		bShowHints = false;
-		bShowPerf = true;
-	}
 }
 
 void AAstronautPawn::PlaceAtSite()
@@ -104,7 +116,8 @@ void AAstronautPawn::DropToGround()
 	const FPlanetTerrain& T = Terrain->GetTerrain();
 	const FVector3d Up = State.Position.GetSafeNormal();
 	const double R = T.Field.GetRadius();
-	// From the highest possible ground down, past any cave: the first rock below the sky.
+	// From just above the point, or - when inside rock - from above the highest ground: the
+	// first rock below.
 	const double Top = R + FPlanetField::MaxHeight + 10;
 	const double Above = FMath::Min(Top, State.Position.Length() + 2.0);
 	FVector3d Hit;
@@ -120,7 +133,7 @@ double AAstronautPawn::DistanceFromSite() const
 {
 	if (Planet == nullptr || Terrain == nullptr)
 		return 0;
-	const FVector3d P = bFreeCam ? FreeCamPosition : State.Position;
+	const FVector3d P = Mode == EViewMode::FreeCam ? FreeCamPosition : State.Position;
 	const double Angle = FMath::Acos(FMath::Clamp(P.GetSafeNormal().Dot(Planet->SiteUp), -1.0, 1.0));
 	return Angle * Terrain->GetTerrain().Field.GetRadius();
 }
@@ -138,9 +151,20 @@ FVector3d AAstronautPawn::ViewRight() const
 	return CamUp.Cross(Heading).GetSafeNormal();
 }
 
+FVector3d AAstronautPawn::PlanningEye() const
+{
+	const FVector3d Up = PlanFocus.GetSafeNormal();
+	return PlanFocus + Up * (PlanDistance * FMath::Sin(-PlanPitch)) - PlanHeading * (PlanDistance * FMath::Cos(PlanPitch));
+}
+
 FVector3d AAstronautPawn::EyePosition() const
 {
-	return bFreeCam ? FreeCamPosition : State.Position + CamUp * (EyeOffset - EyeDip);
+	switch (Mode)
+	{
+	case EViewMode::FreeCam: return FreeCamPosition;
+	case EViewMode::Planning: return PlanningEye();
+	default: return State.Position + CamUp * (EyeOffset - EyeDip);
+	}
 }
 
 void AAstronautPawn::Tick(float DeltaSeconds)
@@ -153,19 +177,77 @@ void AAstronautPawn::Tick(float DeltaSeconds)
 		return;
 	const double Dt = FMath::Min(double(DeltaSeconds), 0.1);
 
-	if (Shot >= 0)
-		UpdateShots(Dt);
-	else
+	if (!bAutomated)
 		HandleInput(PC, float(Dt));
-	if (bFreeCam)
+	switch (Mode)
+	{
+	case EViewMode::FreeCam:
 		UpdateFreeCam(PC, Dt);
-	else
-		StepMotion(PC, Dt);
+		break;
+	case EViewMode::Planning:
+		// The astronaut keeps standing (and falling, and being dug under) while you plan.
+		StepMotion(PC, Dt, false);
+		UpdatePlanning(PC, Dt);
+		break;
+	default:
+		StepMotion(PC, Dt, !bAutomated);
+		break;
+	}
 	UpdateTool(PC, Dt);
 	UpdateCamera(Dt);
 
 	const double Now = GetWorld()->GetTimeSeconds();
 	Toasts.RemoveAll([Now](const FHudToast& T) { return T.Until < Now; });
+}
+
+void AAstronautPawn::SetMode(EViewMode NewMode, APlayerController* PC)
+{
+	if (NewMode == Mode)
+		return;
+	if (Mode != EViewMode::Walk && NewMode == EViewMode::Walk && Mode == EViewMode::FreeCam)
+	{
+		// Leaving the free camera is fast travel: the astronaut drops to the ground below it.
+		State.Position = FreeCamPosition;
+		DropToGround();
+		CamUp = State.Up;
+		Heading = Orthonormal(Heading, CamUp, Heading);
+		bFlightActive = false;
+		JumpJet.Reset();
+	}
+	if (NewMode == EViewMode::Planning)
+	{
+		FVector3d Ground;
+		const FVector3d Up = State.Position.GetSafeNormal();
+		PlanFocus = Terrain->GetTerrain().Trace(State.Position + Up * 2.0, -Up, 50.0, Terrain->GetEdits(), Ground) ? Ground : State.Position;
+		PlanHeading = Orthonormal(Heading, PlanFocus.GetSafeNormal(), Heading);
+		PlanDistance = 45;
+		PlanPitch = FMath::DegreesToRadians(-55.0);
+	}
+	if (NewMode == EViewMode::FreeCam)
+		FreeCamPosition = EyePosition();
+	if (Mode == EViewMode::Planning)
+	{
+		// Back to the astronaut's own view.
+		CamUp = State.Up;
+		Heading = Orthonormal(Heading, CamUp, Heading);
+	}
+	Mode = NewMode;
+	if (PC != nullptr)
+	{
+		const bool bCursor = Mode == EViewMode::Planning;
+		PC->bShowMouseCursor = bCursor;
+		if (bCursor)
+		{
+			FInputModeGameAndUI Input;
+			Input.SetHideCursorDuringCapture(false);
+			PC->SetInputMode(Input);
+		}
+		else
+			PC->SetInputMode(FInputModeGameOnly());
+	}
+	Selected = 0;
+	if (Planet != nullptr && Planet->GetStructures() != nullptr)
+		Planet->GetStructures()->Highlight(0);
 }
 
 void AAstronautPawn::HandleInput(APlayerController* PC, float Dt)
@@ -174,7 +256,7 @@ void AAstronautPawn::HandleInput(APlayerController* PC, float Dt)
 	const bool bShift = PC->IsInputKeyDown(EKeys::LeftShift) || PC->IsInputKeyDown(EKeys::RightShift);
 
 	// Look: yaw about the camera's up, pitch clamped short of straight up/down.
-	if (!PC->bShowMouseCursor)
+	if (Mode != EViewMode::Planning && !PC->bShowMouseCursor)
 	{
 		float Dx = 0, Dy = 0;
 		PC->GetInputMouseDelta(Dx, Dy);
@@ -185,50 +267,73 @@ void AAstronautPawn::HandleInput(APlayerController* PC, float Dt)
 
 	if (PC->WasInputKeyJustPressed(EKeys::Escape))
 	{
-		PC->bShowMouseCursor = !PC->bShowMouseCursor;
-		if (PC->bShowMouseCursor)
-			PC->SetInputMode(FInputModeGameAndUI());
+		if (Mode == EViewMode::Planning)
+			SetMode(EViewMode::Walk, PC);
 		else
-			PC->SetInputMode(FInputModeGameOnly());
+		{
+			PC->bShowMouseCursor = !PC->bShowMouseCursor;
+			if (PC->bShowMouseCursor)
+				PC->SetInputMode(FInputModeGameAndUI());
+			else
+				PC->SetInputMode(FInputModeGameOnly());
+		}
 	}
-	if (PC->bShowMouseCursor && PC->WasInputKeyJustPressed(EKeys::LeftMouseButton))
+	if (Mode != EViewMode::Planning && PC->bShowMouseCursor && PC->WasInputKeyJustPressed(EKeys::LeftMouseButton))
 	{
 		PC->bShowMouseCursor = false;
 		PC->SetInputMode(FInputModeGameOnly());
 	}
 
+	if (PC->WasInputKeyJustPressed(EKeys::O))
+		SetMode(Mode == EViewMode::Planning ? EViewMode::Walk : EViewMode::Planning, PC);
+	if (PC->WasInputKeyJustPressed(EKeys::F))
+	{
+		SetMode(Mode == EViewMode::FreeCam ? EViewMode::Walk : EViewMode::FreeCam, PC);
+		if (Mode == EViewMode::FreeCam)
+			Toast(TEXT("Free camera: speed follows altitude, wheel boosts. F drops you to the ground below."));
+	}
+	if (PC->WasInputKeyJustPressed(EKeys::T))
+	{
+		bBuildMode = !bBuildMode;
+		Toast(bBuildMode ? TEXT("Build mode: 1-3 type, R rotate, LMB place, RMB or X remove, T to leave") : TEXT("Build mode off"),
+			FLinearColor(0.85f, 0.75f, 0.4f));
+	}
+	if (bBuildMode && !bCtrl)
+	{
+		if (PC->WasInputKeyJustPressed(EKeys::One)) BuildType = EStructureType::FoundationPad;
+		if (PC->WasInputKeyJustPressed(EKeys::Two)) BuildType = EStructureType::Depot;
+		if (PC->WasInputKeyJustPressed(EKeys::Three)) BuildType = EStructureType::Beacon;
+		if (PC->WasInputKeyJustPressed(EKeys::R)) BuildYawDeg += bShift ? -15 : 15;
+	}
 	if (PC->WasInputKeyJustPressed(EKeys::G))
 	{
 		Suit.bGodMode = !Suit.bGodMode;
 		Toast(Suit.bGodMode ? TEXT("God mode: infinite suit energy, uncapped pace, 120 m reach") : TEXT("God mode off"),
 			FLinearColor(1.f, 0.85f, 0.3f));
 	}
+	if (PC->WasInputKeyJustPressed(EKeys::L) && !bCtrl)
+	{
+		SetLampOn(!bLamp);
+	}
+	if (PC->WasInputKeyJustPressed(EKeys::Y) && Mode == EViewMode::Walk)
+	{
+		FVector3d Hit;
+		if (Planet->GetFluids() != nullptr && Terrain->GetTerrain().Trace(EyePosition(), ViewForward(), 40.0, Terrain->GetEdits(), Hit))
+		{
+			const FVector3d At = Hit + Terrain->Normal(Hit) * 0.4;
+			if (Planet->GetFluids()->RegionAt(At) == INDEX_NONE)
+				Toast(TEXT("No water region here (the test site has two)"), FLinearColor(1.f, 0.6f, 0.3f));
+			else
+				Toast(Planet->GetFluids()->ToggleSpringAt(At) ? TEXT("Spring added") : TEXT("Spring removed"), FLinearColor(0.5f, 0.8f, 1.f));
+		}
+	}
 	if (PC->WasInputKeyJustPressed(EKeys::H))
 		bShowHints = !bShowHints;
 	if (PC->WasInputKeyJustPressed(EKeys::P))
 		bShowPerf = !bShowPerf;
-	if (PC->WasInputKeyJustPressed(EKeys::F))
-	{
-		if (!bFreeCam)
-		{
-			bFreeCam = true;
-			FreeCamPosition = EyePosition();
-			Toast(TEXT("Free camera: speed follows altitude, wheel boosts. F drops you to the ground below."));
-		}
-		else
-		{
-			bFreeCam = false;
-			State.Position = FreeCamPosition;
-			DropToGround();
-			CamUp = State.Up;
-			Heading = Orthonormal(Heading, CamUp, Heading);
-			bFlightActive = false;
-			JumpJet.Reset();
-		}
-	}
 	if (PC->WasInputKeyJustPressed(EKeys::Home))
 	{
-		bFreeCam = false;
+		SetMode(EViewMode::Walk, PC);
 		PlaceAtSite();
 		Toast(TEXT("Back at the start site"));
 	}
@@ -247,12 +352,16 @@ void AAstronautPawn::HandleInput(APlayerController* PC, float Dt)
 		Toast(Terrain->bFreezeLod ? TEXT("LOD frozen") : TEXT("LOD live"));
 	}
 
-	// Wheel: pace (Shift: brush size); in the free camera, its speed.
+	// Wheel: pace (Shift: brush size); free camera speed; planning zoom; build rotation.
 	const int32 Wheel = (PC->WasInputKeyJustPressed(EKeys::MouseScrollUp) ? 1 : 0) - (PC->WasInputKeyJustPressed(EKeys::MouseScrollDown) ? 1 : 0);
 	if (Wheel != 0)
 	{
-		if (bFreeCam)
+		if (Mode == EViewMode::FreeCam)
 			FreeCamBoost = FMath::Clamp(FreeCamBoost * (Wheel > 0 ? 1.25 : 0.8), 0.05, 50.0);
+		else if (Mode == EViewMode::Planning && !(bBuildMode && bShift))
+			PlanDistance = FMath::Clamp(PlanDistance * (Wheel > 0 ? 0.85 : 1.0 / 0.85), 8.0, 20000.0);
+		else if (bBuildMode)
+			BuildYawDeg += Wheel * 15;
 		else if (bShift)
 			RadiusSetting = SculptBrush::ScrollRadius(RadiusSetting, Wheel, Suit.bGodMode);
 		else
@@ -260,7 +369,7 @@ void AAstronautPawn::HandleInput(APlayerController* PC, float Dt)
 	}
 }
 
-void AAstronautPawn::StepMotion(APlayerController* PC, double Dt)
+void AAstronautPawn::StepMotion(APlayerController* PC, double Dt, bool bInput)
 {
 	const FPlanetTerrain& T = Terrain->GetTerrain();
 	const FTerrainEdits* Edits = Terrain->GetEdits();
@@ -268,18 +377,21 @@ void AAstronautPawn::StepMotion(APlayerController* PC, double Dt)
 	auto GravityUp = [](const FVector3d& P) { return P.GetSafeNormal(); };
 	auto Normal = [&T, Edits](const FVector3d& P) { return T.Normal(P, Edits); };
 
-	const bool bShift = PC->IsInputKeyDown(EKeys::LeftShift);
-	const bool bSpace = PC->IsInputKeyDown(EKeys::SpaceBar);
-	const bool bDown = PC->IsInputKeyDown(EKeys::LeftControl) || PC->IsInputKeyDown(EKeys::C);
-	const double Fwd = Axis(PC, EKeys::W, EKeys::S), Side = Axis(PC, EKeys::D, EKeys::A);
+	const bool bShift = bInput && PC->IsInputKeyDown(EKeys::LeftShift);
+	const bool bSpace = bInput && PC->IsInputKeyDown(EKeys::SpaceBar);
+	const bool bDown = bInput && (PC->IsInputKeyDown(EKeys::LeftControl) || PC->IsInputKeyDown(EKeys::C));
+	const double Fwd = bInput ? Axis(PC, EKeys::W, EKeys::S) : 0, Side = bInput ? Axis(PC, EKeys::D, EKeys::A) : 0;
 
 	StepAccumulator = FMath::Min(StepAccumulator + Dt, 8.0 / MotionHz);
 	const double Step = 1.0 / MotionHz;
+	// Walking directions follow the astronaut's own heading, also while another view is active.
+	const FVector3d WalkUp = Mode == EViewMode::Walk ? CamUp : State.Up;
+	const FVector3d WalkHeading = Orthonormal(Heading, WalkUp, Heading);
 	while (StepAccumulator >= Step)
 	{
 		StepAccumulator -= Step;
-		const FVector3d Right = ViewRight();
-		const FVector3d Wish = Heading * Fwd + Right * Side;
+		const FVector3d Right = WalkUp.Cross(WalkHeading).GetSafeNormal();
+		const FVector3d Wish = WalkHeading * Fwd + Right * Side;
 
 		bool bJump = false, bJet = false;
 		JumpJet.Update(bSpace, State.bGrounded, Suit.CanThrust(), Step, bJump, bJet);
@@ -288,7 +400,7 @@ void AAstronautPawn::StepMotion(APlayerController* PC, double Dt)
 		if (State.bGrounded || !Suit.CanThrust())
 			bFlightActive = false;
 
-		FVector3d FlightWish = ViewForward() * Fwd + Right * Side + CamUp * ((bSpace ? 1.0 : 0.0) - (bDown ? 1.0 : 0.0));
+		FVector3d FlightWish = ViewForward() * Fwd + Right * Side + WalkUp * ((bSpace ? 1.0 : 0.0) - (bDown ? 1.0 : 0.0));
 		const double R = T.Field.GetRadius();
 		const double Gravity = FMath::Square(R / FMath::Max(R, State.Position.Length()));
 		State = CharacterMotion::Step(State, Density, GravityUp, Normal, Wish, bJump, bJet && !bFlightActive, bShift, Step, Gravity,
@@ -300,29 +412,78 @@ void AAstronautPawn::StepMotion(APlayerController* PC, double Dt)
 			EyeDip = FMath::Min(0.25, State.LandingSpeed * 0.03);
 	}
 	EyeDip *= FMath::Exp(-6.0 * Dt);
-	Altitude = FMath::Max(0.0, Density(State.Position) - CharacterMotion::Radius);
+	if (Mode == EViewMode::Walk)
+		Altitude = FMath::Max(0.0, Density(State.Position) - CharacterMotion::Radius);
 }
 
 void AAstronautPawn::UpdateFreeCam(APlayerController* PC, double Dt)
 {
 	const FPlanetTerrain& T = Terrain->GetTerrain();
 	Altitude = FMath::Max(0.0, T.Density(FreeCamPosition, Terrain->GetEdits()));
-	const bool bShift = PC->IsInputKeyDown(EKeys::LeftShift);
-	const double Speed = FMath::Clamp(Altitude, 4.0, 300000.0) * (bShift ? 6.0 : 1.0) * FreeCamBoost;
-	LastFreeCamSpeed = Speed;
-	const FVector3d V = ViewForward() * Axis(PC, EKeys::W, EKeys::S) + ViewRight() * Axis(PC, EKeys::D, EKeys::A)
-		+ CamUp * ((PC->IsInputKeyDown(EKeys::SpaceBar) ? 1.0 : 0.0) - (PC->IsInputKeyDown(EKeys::LeftControl) || PC->IsInputKeyDown(EKeys::C) ? 1.0 : 0.0));
-	if (V.SizeSquared() > 1e-8)
-		FreeCamPosition += V.GetSafeNormal() * Speed * Dt;
+	if (!bAutomated)
+	{
+		const bool bShift = PC->IsInputKeyDown(EKeys::LeftShift);
+		const double Speed = FMath::Clamp(Altitude, 4.0, 300000.0) * (bShift ? 6.0 : 1.0) * FreeCamBoost;
+		LastFreeCamSpeed = Speed;
+		const FVector3d V = ViewForward() * Axis(PC, EKeys::W, EKeys::S) + ViewRight() * Axis(PC, EKeys::D, EKeys::A)
+			+ CamUp * ((PC->IsInputKeyDown(EKeys::SpaceBar) ? 1.0 : 0.0) - (PC->IsInputKeyDown(EKeys::LeftControl) || PC->IsInputKeyDown(EKeys::C) ? 1.0 : 0.0));
+		if (V.SizeSquared() > 1e-8)
+			FreeCamPosition += V.GetSafeNormal() * Speed * Dt;
+	}
 	// Never below the ground.
 	const double D = T.Density(FreeCamPosition, Terrain->GetEdits());
 	if (D < 0.5)
 		FreeCamPosition += FreeCamPosition.GetSafeNormal() * (0.5 - D);
 }
 
+void AAstronautPawn::UpdatePlanning(APlayerController* PC, double Dt)
+{
+	const FPlanetTerrain& T = Terrain->GetTerrain();
+	const FTerrainEdits* Edits = Terrain->GetEdits();
+	FVector3d Up = PlanFocus.GetSafeNormal();
+	if (!bAutomated)
+	{
+		const bool bShift = PC->IsInputKeyDown(EKeys::LeftShift);
+		// Pan across the ground, faster the higher the view; Q/E and a middle-button drag turn it.
+		const FVector3d Right = Up.Cross(PlanHeading).GetSafeNormal();
+		const FVector3d Pan = PlanHeading * Axis(PC, EKeys::W, EKeys::S) + Right * Axis(PC, EKeys::D, EKeys::A);
+		if (Pan.SizeSquared() > 1e-8)
+			PlanFocus += Pan.GetSafeNormal() * PlanDistance * (bShift ? 3.0 : 1.0) * Dt;
+		double Turn = Axis(PC, EKeys::E, EKeys::Q) * 1.2 * Dt;
+		if (PC->IsInputKeyDown(EKeys::MiddleMouseButton))
+		{
+			float Dx = 0, Dy = 0;
+			PC->GetInputMouseDelta(Dx, Dy);
+			Turn += FMath::DegreesToRadians(Dx * 2.0);
+			PlanPitch = FMath::Clamp(PlanPitch + FMath::DegreesToRadians(Dy * 2.0), FMath::DegreesToRadians(-88.0), FMath::DegreesToRadians(-12.0));
+		}
+		PlanHeading = Orthonormal(RotateAbout(PlanHeading, Up, Turn), Up, PlanHeading);
+	}
+	// Keep the focus on the ground (a cave roof counts, as seen from above).
+	Up = PlanFocus.GetSafeNormal();
+	FVector3d Ground;
+	if (T.Trace(PlanFocus + Up * 400.0, -Up, 1200.0, Edits, Ground))
+		PlanFocus = Ground;
+	PlanHeading = Orthonormal(PlanHeading, Up, PlanHeading);
+	// And the eye above it.
+	const FVector3d Eye = PlanningEye();
+	const double D = T.Density(Eye, Edits);
+	if (D < 2.0)
+		PlanDistance = FMath::Min(20000.0, PlanDistance + (2.0 - D) * 1.5);
+	Altitude = FMath::Max(0.0, D);
+}
+
 void AAstronautPawn::UpdateCamera(double Dt)
 {
-	const FVector3d TargetUp = bFreeCam ? FreeCamPosition.GetSafeNormal() : State.Up;
+	if (Mode == EViewMode::Planning)
+	{
+		const FVector3d Eye = PlanningEye();
+		const FVector3d Up = Eye.GetSafeNormal();
+		const FVector WorldForward = Terrain->PlanetDirToWorld((PlanFocus - Eye).GetSafeNormal());
+		SetActorLocationAndRotation(Terrain->PlanetToWorld(Eye), FRotationMatrix::MakeFromXZ(WorldForward, Terrain->PlanetDirToWorld(Up)).ToQuat());
+		return;
+	}
+	const FVector3d TargetUp = Mode == EViewMode::FreeCam ? FreeCamPosition.GetSafeNormal() : State.Up;
 	const FVector3d OldUp = CamUp;
 	CamUp = Dt > 0 ? PlayerOrientation::SmoothUp(CamUp, TargetUp, 10.0, Dt) : TargetUp;
 	Heading = Orthonormal(PlayerOrientation::Transport(Heading, OldUp, CamUp), CamUp, Heading);
@@ -332,22 +493,76 @@ void AAstronautPawn::UpdateCamera(double Dt)
 	SetActorLocationAndRotation(Terrain->PlanetToWorld(EyePosition()), FRotationMatrix::MakeFromXZ(WorldForward, WorldUp).ToQuat());
 }
 
+void AAstronautPawn::PayOut(const FEditResult& R)
+{
+	for (int32 M = 0; M < int32(EGeoMaterial::Count); M++)
+	{
+		if (R.Volume[M] <= 0)
+			continue; // building pays nothing back
+		const int32 Units = Credit.Credit(EGeoMaterial(M), R.Volume[M]);
+		if (Units <= 0)
+			continue;
+		const EItemType Item = Items::ForMaterial(EGeoMaterial(M));
+		const int32 Added = Inventory.Add(Item, Units);
+		if (Added > 0)
+			Toast(FString::Printf(TEXT("+%d %s"), Added, Items::NameOf(Item)), FLinearColor(0.6f, 0.9f, 1.f));
+		if (Added < Units)
+			Toast(TEXT("Pockets full"), FLinearColor(1.f, 0.4f, 0.3f));
+	}
+}
+
 void AAstronautPawn::UpdateTool(APlayerController* PC, double Dt)
 {
-	if (bFreeCam)
+	const FPlanetTerrain& T = Terrain->GetTerrain();
+	const FTerrainEdits* Edits = Terrain->GetEdits();
+
+	// What the view points at: the crosshair, or in the planning view the mouse cursor.
+	FVector3d From = EyePosition(), Dir = ViewForward();
+	double Range = Suit.bGodMode ? SculptBrush::GodReach + 20 : SculptBrush::Reach + 20;
+	if (Mode == EViewMode::Planning)
+	{
+		FVector WorldPos, WorldDir;
+		if (!bAutomated && PC->DeprojectMousePositionToWorld(WorldPos, WorldDir))
+			Dir = Terrain->WorldDirToPlanet(WorldDir).GetSafeNormal();
+		else
+			Dir = (PlanFocus - From).GetSafeNormal();
+		Range = 30000;
+	}
+	else if (bBuildMode)
+		Range = Suit.bGodMode ? 140 : BuildReach + 10;
+	FVector3d Hit;
+	const bool bHit = Mode != EViewMode::FreeCam && T.Trace(From, Dir, Range, Edits, Hit);
+
+	UpdateInspect(Hit, bHit);
+
+	if (bBuildMode && Mode != EViewMode::FreeCam)
 	{
 		HideCursor();
 		Status.Reset();
+		UpdateBuild(PC, Hit, bHit, Mode == EViewMode::Planning || Suit.bGodMode || (bHit && FVector3d::Dist(State.Position, Hit) <= BuildReach));
 		return;
 	}
-	const FPlanetTerrain& T = Terrain->GetTerrain();
+	if (Planet->GetStructures() != nullptr)
+		Planet->GetStructures()->HidePreview();
+	bPlacementTarget = false;
+
+	if (Mode != EViewMode::Walk)
+	{
+		HideCursor();
+		Status.Reset();
+		// Selecting in the planning view.
+		if (Mode == EViewMode::Planning && !bAutomated && PC->WasInputKeyJustPressed(EKeys::LeftMouseButton))
+		{
+			Selected = Hovered;
+			Planet->GetStructures()->Highlight(Selected);
+		}
+		return;
+	}
+
 	const bool bGod = Suit.bGodMode;
 	const double Reach = bGod ? SculptBrush::GodReach : SculptBrush::Reach;
 	const double Radius = BrushRadius();
-
-	FVector3d Hit;
-	const FVector3d Eye = EyePosition();
-	bAimed = T.Trace(Eye, ViewForward(), Reach + 20.0, Terrain->GetEdits(), Hit);
+	bAimed = bHit;
 	if (!bAimed)
 	{
 		bInReach = false;
@@ -359,21 +574,26 @@ void AAstronautPawn::UpdateTool(APlayerController* PC, double Dt)
 	bInReach = FVector3d::Dist(State.Position, Hit) <= Reach + Radius;
 
 	// A footprint-scale surface frame, smoothed, so the brush does not snap to every facet.
-	const FVector3d N = T.Normal(Hit, Terrain->GetEdits(), FMath::Max(0.3, Radius * 0.4));
+	const FVector3d N = T.Normal(Hit, Edits, FMath::Max(0.3, Radius * 0.4));
 	BrushNormal = BrushNormal.Dot(N) < 0.5 ? N : PlayerOrientation::SmoothUp(BrushNormal, N, 12.0, Dt);
-
-	const FVector3d Inside = Hit - BrushNormal * 0.3;
-	AimRock = T.Field.Geology(Inside, -T.Field.Density(Inside));
+	AimRock = T.RockAt(Hit - BrushNormal * 0.3, Edits);
 
 	FVector3d Center = Hit;
 	SculptBrush::ProjectSurface([this](const FVector3d& P) { return Terrain->Density(P); }, Hit, BrushNormal, Radius * 0.6, Center);
 
-	const bool bDig = PC->IsInputKeyDown(EKeys::RightMouseButton);
-	const bool bBuild = !bDig && PC->IsInputKeyDown(EKeys::LeftMouseButton) && !PC->bShowMouseCursor;
+	const bool bCtrl = !bAutomated && (PC->IsInputKeyDown(EKeys::LeftControl) || PC->IsInputKeyDown(EKeys::RightControl));
+	const bool bDig = !bAutomated && PC->IsInputKeyDown(EKeys::RightMouseButton);
+	const bool bBuild = !bAutomated && !bDig && PC->IsInputKeyDown(EKeys::LeftMouseButton) && !PC->bShowMouseCursor;
+	const bool bGrade = bDig && bCtrl && State.bGrounded;
+	if (bGrade && !bGrading)
+		GradePoint = Center; // the pad's height is where the grading started
+	bGrading = bGrade;
+
 	if ((bDig || bBuild) && bInReach)
 	{
 		DigWork = SculptBrush::Charge(DigWork, Dt, BrushPace(), 1);
-		Status = bDig ? FString::Printf(TEXT("sculpting - %s, hardness x%.1f"), FPlanetField::MaterialName(AimRock.Material), AimRock.Hardness)
+		Status = bGrade ? FString(TEXT("grading a flat pad"))
+			: bDig ? FString::Printf(TEXT("sculpting - %s, hardness x%.1f"), FPlanetField::MaterialName(AimRock.Material), AimRock.Hardness)
 			: FString(TEXT("building"));
 		if (DigWork >= 1.0 && !Terrain->IsEditPending())
 		{
@@ -384,28 +604,24 @@ void AAstronautPawn::UpdateTool(APlayerController* PC, double Dt)
 			}
 			else
 			{
-				const double Depth = SculptBrush::Depth(Radius, bDig ? AimRock.Hardness : 1.0, bGod);
-				const FSculptOp Op = FSculptOp::Make(Center, -BrushNormal, Radius, bDig ? Depth : -Depth);
+				FEditOp Op;
+				if (bGrade)
+				{
+					// Level to the plane through the starting point, under gravity's up.
+					const FVector3d Up = GradePoint.GetSafeNormal();
+					const FVector3d OnPlane = Center - Up * (Center - GradePoint).Dot(Up);
+					Op = FEditOp::Flatten(OnPlane, Up, Heading, Radius, Radius, FMath::Max(1.5, Radius * 0.8), 0, Radius * 0.35);
+				}
+				else
+				{
+					const double Depth = SculptBrush::Depth(Radius, bDig ? AimRock.Hardness : 1.0, bGod);
+					Op = FEditOp::Sculpt(Center, -BrushNormal, Radius, bDig ? Depth : -Depth);
+				}
 				TWeakObjectPtr<AAstronautPawn> Self(this);
 				if (Terrain->RequestEdit(Op, [Self](const FEditResult& R)
 				{
-					AAstronautPawn* P = Self.Get();
-					if (P == nullptr)
-						return;
-					for (int32 M = 0; M < int32(EGeoMaterial::Count); M++)
-					{
-						if (R.Volume[M] <= 0)
-							continue; // building pays nothing back
-						const int32 Units = P->Credit.Credit(EGeoMaterial(M), R.Volume[M]);
-						if (Units <= 0)
-							continue;
-						const EItemType Item = Items::ForMaterial(EGeoMaterial(M));
-						const int32 Added = P->Inventory.Add(Item, Units);
-						if (Added > 0)
-							P->Toast(FString::Printf(TEXT("+%d %s"), Added, Items::NameOf(Item)), FLinearColor(0.6f, 0.9f, 1.f));
-						if (Added < Units)
-							P->Toast(TEXT("Pockets full"), FLinearColor(1.f, 0.4f, 0.3f));
-					}
+					if (AAstronautPawn* P = Self.Get())
+						P->PayOut(R);
 				}))
 					DigWork -= 1.0;
 			}
@@ -419,6 +635,85 @@ void AAstronautPawn::UpdateTool(APlayerController* PC, double Dt)
 			: FString(TEXT("out of reach"));
 	}
 	DrawCursor(Center, BrushNormal, Radius, BiteProgress(), bInReach);
+}
+
+void AAstronautPawn::UpdateBuild(APlayerController* PC, const FVector3d& Hit, bool bHit, bool bInReachToPlace)
+{
+	AStructuresActor* S = Planet->GetStructures();
+	bPlacementTarget = bHit;
+	if (!bHit)
+	{
+		S->HidePreview();
+		return;
+	}
+	const FVector3d Up = Hit.GetSafeNormal();
+	const FVector3d Base = Mode == EViewMode::Planning ? PlanHeading : Heading;
+	const FVector3d Forward = RotateAbout(Orthonormal(Base, Up, Base), Up, FMath::DegreesToRadians(BuildYawDeg));
+	Placement = S->Check(BuildType, Hit, Forward);
+	if (Placement.bValid && !bInReachToPlace)
+	{
+		Placement.bValid = false;
+		Placement.Reason = TEXT("too far - walk closer, or plan it from above (O)");
+	}
+	S->ShowPreview(BuildType, Placement);
+	if (bAutomated)
+		return;
+	if (PC->WasInputKeyJustPressed(EKeys::LeftMouseButton))
+	{
+		if (Placement.bValid)
+		{
+			const uint32 Id = S->Place(Placement, BuildType);
+			Toast(FString::Printf(TEXT("Placed %s #%u"), FStructureSet::NameOf(BuildType), Id), FLinearColor(0.6f, 1.f, 0.6f));
+		}
+		else
+			Toast(FString::Printf(TEXT("Can't place: %s"), *Placement.Reason), FLinearColor(1.f, 0.5f, 0.3f));
+	}
+	if ((PC->WasInputKeyJustPressed(EKeys::RightMouseButton) || PC->WasInputKeyJustPressed(EKeys::X)) && Hovered != 0)
+	{
+		const FStructure* Found = S->GetSet().Find(Hovered);
+		const FString Name = Found != nullptr ? FStructureSet::NameOf(Found->Type) : TEXT("structure");
+		if (S->Remove(Hovered))
+			Toast(FString::Printf(TEXT("Removed %s #%u"), *Name, Hovered), FLinearColor(1.f, 0.8f, 0.5f));
+		Hovered = 0;
+	}
+}
+
+void AAstronautPawn::UpdateInspect(const FVector3d& Hit, bool bHit)
+{
+	Inspect.Reset();
+	Hovered = 0;
+	if (!bHit || (Mode != EViewMode::Planning && !bBuildMode))
+		return;
+	const FPlanetTerrain& T = Terrain->GetTerrain();
+	const FTerrainEdits* Edits = Terrain->GetEdits();
+	const double R = T.Field.GetRadius();
+	const FVector3d Up = Hit.GetSafeNormal();
+	const FVector3d N = T.Normal(Hit, Edits, 0.5);
+	double Original = 0;
+	T.SurfaceAt(Hit, &Original);
+	const double Depth = (R + Original) - Hit.Length();
+	const FGeoSample Rock = T.RockAt(Hit - N * 0.3, Edits);
+
+	if (const FStructure* S = Planet->GetStructures()->GetSet().At(Hit))
+	{
+		Hovered = S->Id;
+		Inspect.Add(FString::Printf(TEXT("%s #%u  (body %d)"), FStructureSet::NameOf(S->Type), S->Id, S->BodyId));
+	}
+	Inspect.Add(FString::Printf(TEXT("%s, hardness x%.1f"), FPlanetField::MaterialName(Rock.Material), Rock.Hardness));
+	if (const FDeposit* D = T.Field.DepositAt(Hit - N * 1.0))
+		Inspect.Add(D->Name);
+	Inspect.Add(FString::Printf(TEXT("ground %+.1f m, slope %.0f deg"), Hit.Length() - R, FMath::RadiansToDegrees(FMath::Acos(FMath::Clamp(N.Dot(Up), -1.0, 1.0)))));
+	if (Depth > 0.3)
+		Inspect.Add(FString::Printf(TEXT("cut %.1f m below the original ground"), Depth));
+	else if (Depth < -0.3)
+		Inspect.Add(FString::Printf(TEXT("built %.1f m above the original ground"), -Depth));
+	Inspect.Add(FString::Printf(TEXT("%.0f m from the astronaut"), FVector3d::Dist(Hit, State.Position)));
+	if (Planet->GetFluids() != nullptr)
+	{
+		const int32 Region = Planet->GetFluids()->RegionAt(Hit + N * 0.3);
+		if (Region != INDEX_NONE)
+			Inspect.Add(FString::Printf(TEXT("water region %d (Y in the walking view toggles a spring)"), Region));
+	}
 }
 
 void AAstronautPawn::DrawCursor(const FVector3d& Center, const FVector3d& Normal, double Radius, double Progress, bool bReady)
@@ -461,7 +756,7 @@ void AAstronautPawn::DrawCursor(const FVector3d& Center, const FVector3d& Normal
 			}
 		}
 	};
-	const FColor Main = bReady ? FColor(80, 180, 255) : FColor(200, 60, 50);
+	const FColor Main = bGrading ? FColor(240, 200, 80) : bReady ? FColor(80, 180, 255) : FColor(200, 60, 50);
 	Ring(Radius, 64, 1.0, Main);
 	if (Progress > 0.01)
 		Ring(Radius * 0.35, 32, Progress, FColor(220, 240, 255));
@@ -475,86 +770,6 @@ void AAstronautPawn::DrawCursor(const FVector3d& Center, const FVector3d& Normal
 void AAstronautPawn::HideCursor()
 {
 	Cursor->SetVisibility(false);
-}
-
-void AAstronautPawn::UpdateShots(double Dt)
-{
-	struct FView { const TCHAR* Name; double Height; double PitchDeg; double YawDeg; bool bDig; };
-	static const FView Views[] = {
-		{ TEXT("eye"), 0, 0, 0, false },
-		{ TEXT("aim"), 0, -32, 0, false },
-		{ TEXT("dig"), 0, -15, 0, true },
-		{ TEXT("rise_150m"), 150, -8, 0, false },
-		{ TEXT("rise_2km"), 2000, -12, 0, false },
-		{ TEXT("high_30km"), 30000, -25, 0, false },
-		{ TEXT("eye_back"), 0, 0, 180, false },
-	};
-	if (Shot >= int32(UE_ARRAY_COUNT(Views)))
-	{
-		UKismetSystemLibrary::QuitGame(this, nullptr, EQuitPreference::Quit, false);
-		Shot = -1;
-		return;
-	}
-	const FView& V = Views[Shot];
-	if (ShotStage == 0)
-	{
-		// Go to the view.
-		PlaceAtSite();
-		Heading = RotateAbout(Planet->SiteForward, Planet->SiteUp, FMath::DegreesToRadians(V.YawDeg));
-		Pitch = FMath::DegreesToRadians(V.PitchDeg);
-		if (V.Height > 0)
-		{
-			bFreeCam = true;
-			FreeCamPosition = State.Position + Planet->SiteUp * V.Height;
-		}
-		else
-			bFreeCam = false;
-		Suit.bGodMode = V.bDig;
-		RadiusSetting = V.bDig ? 2.5 : 2.0;
-		ShotBites = V.bDig ? 14 : 0;
-		ShotWait = 0;
-		ShotStage = 1;
-		return;
-	}
-	if (ShotStage == 1)
-	{
-		// Dig the test pit: one bite whenever the last has landed.
-		if (ShotBites > 0 && !Terrain->IsEditPending())
-		{
-			FVector3d Hit;
-			if (Terrain->GetTerrain().Trace(EyePosition(), ViewForward(), 30, Terrain->GetEdits(), Hit))
-			{
-				const FVector3d N = Terrain->Normal(Hit);
-				const double Depth = SculptBrush::Depth(RadiusSetting, 1.0, true) * 3;
-				Terrain->RequestEdit(FSculptOp::Make(Hit, -N, RadiusSetting, Depth), [](const FEditResult&) {});
-			}
-			if (--ShotBites == 0)
-			{
-				// Look down into the pit from above and behind.
-				bFreeCam = true;
-				FreeCamPosition = State.Position + Planet->SiteUp * 6.0 - Heading * 1.0;
-				Pitch = FMath::DegreesToRadians(-48.0);
-			}
-		}
-		// Wait for the bites and the terrain to settle, and the lighting to adapt.
-		ShotWait += Dt;
-		if (ShotBites == 0 && !Terrain->IsEditPending() && !Terrain->IsJobRunning() && Terrain->HasTerrain() && ShotWait > 6.0)
-		{
-			const FString Path = ShotsDir / FString::Printf(TEXT("%02d_%s.png"), Shot, V.Name);
-			FScreenshotRequest::RequestScreenshot(Path, true, false);
-			UE_LOG(LogStellar, Log, TEXT("SHOT %s: %d nodes, %.2f M triangles, last mesh %.0f ms"), *Path, Terrain->NumNodes(),
-				Terrain->NumTriangles() / 1e6, Terrain->LastMeshMs());
-			ShotStage = 2;
-			ShotWait = 0;
-		}
-		return;
-	}
-	ShotWait += Dt;
-	if (ShotWait > 0.5)
-	{
-		Shot++;
-		ShotStage = 0;
-	}
 }
 
 void AAstronautPawn::Toast(const FString& Text, const FLinearColor& Color)
@@ -572,6 +787,83 @@ void AAstronautPawn::Toast(const FString& Text, const FLinearColor& Color)
 		Toasts.RemoveAt(0);
 }
 
+void AAstronautPawn::SetLampOn(bool bOn)
+{
+	bLamp = bOn;
+	Lamp->SetVisibility(bOn);
+}
+
+// ---- director ----
+
+void AAstronautPawn::SetAutomated(bool bOn)
+{
+	bAutomated = bOn;
+	if (bOn)
+		bShowHints = false;
+}
+
+void AAstronautPawn::DirectWalk(const FVector3d& Ground, const FVector3d& Forward, double PitchDeg)
+{
+	SetMode(EViewMode::Walk, nullptr);
+	State = FCharacterState();
+	State.Position = Ground + Ground.GetSafeNormal() * 1.5;
+	DropToGround();
+	CamUp = State.Up;
+	Heading = Orthonormal(Forward, CamUp, Heading);
+	Pitch = FMath::DegreesToRadians(PitchDeg);
+	bFlightActive = false;
+	JumpJet.Reset();
+	UpdateCamera(0);
+}
+
+void AAstronautPawn::DirectFreeCam(const FVector3d& Eye, const FVector3d& Target)
+{
+	SetMode(EViewMode::FreeCam, nullptr);
+	FreeCamPosition = Eye;
+	CamUp = Eye.GetSafeNormal();
+	const FVector3d Dir = (Target - Eye).GetSafeNormal();
+	Heading = Orthonormal(Dir, CamUp, Heading);
+	Pitch = FMath::Asin(FMath::Clamp(Dir.Dot(CamUp), -0.999, 0.999));
+	UpdateCamera(0);
+}
+
+void AAstronautPawn::DirectPlanning(const FVector3d& Focus, double Distance, double PitchDeg, const FVector3d& InHeading)
+{
+	SetMode(EViewMode::Planning, nullptr);
+	PlanFocus = Focus;
+	PlanDistance = Distance;
+	PlanPitch = FMath::DegreesToRadians(PitchDeg);
+	PlanHeading = Orthonormal(InHeading, Focus.GetSafeNormal(), PlanHeading);
+	UpdateCamera(0);
+}
+
+void AAstronautPawn::DirectReturn()
+{
+	if (Mode == EViewMode::FreeCam)
+		SetMode(EViewMode::Walk, nullptr);
+	else if (Mode == EViewMode::Planning)
+		SetMode(EViewMode::Walk, nullptr);
+	UpdateCamera(0);
+}
+
+bool AAstronautPawn::DirectBite(double Radius, double Depth)
+{
+	if (Terrain->IsEditPending())
+		return false;
+	FVector3d Hit;
+	if (!Terrain->GetTerrain().Trace(EyePosition(), ViewForward(), 200.0, Terrain->GetEdits(), Hit))
+		return false;
+	const FVector3d N = Terrain->Normal(Hit);
+	TWeakObjectPtr<AAstronautPawn> Self(this);
+	return Terrain->RequestEdit(FEditOp::Sculpt(Hit, -N, Radius, Depth), [Self](const FEditResult& R)
+	{
+		if (AAstronautPawn* P = Self.Get())
+			P->PayOut(R);
+	});
+}
+
+// ---- saves ----
+
 FString AAstronautPawn::SavePath() const
 {
 	return FPaths::ProjectSavedDir() / TEXT("SaveGames") / TEXT("stellar_save.bin");
@@ -579,82 +871,204 @@ FString AAstronautPawn::SavePath() const
 
 void AAstronautPawn::SaveGame()
 {
-	if (!State.bGrounded && !bFreeCam)
+	if (Mode == EViewMode::Walk && !State.bGrounded)
 	{
 		Toast(TEXT("Save while standing on the ground"), FLinearColor(1.f, 0.6f, 0.3f));
 		return;
 	}
-	const FTerrainEdits EditsCopy = *Terrain->GetEdits();
+	FString Error;
+	if (SaveTo(SavePath(), Error))
+		Toast(FString::Printf(TEXT("Saved (%d edited bricks, %d structures)"), Terrain->GetEdits()->NumBricks(),
+			Planet->GetStructures()->GetSet().All().Num()), FLinearColor(0.6f, 1.f, 0.6f));
+	else
+		Toast(FString::Printf(TEXT("Save failed: %s"), *Error), FLinearColor(1.f, 0.3f, 0.3f));
+}
+
+void AAstronautPawn::LoadGame()
+{
+	if (Mode == EViewMode::Walk && !State.bGrounded)
+	{
+		Toast(TEXT("Load while standing on the ground"), FLinearColor(1.f, 0.6f, 0.3f));
+		return;
+	}
+	FString Error;
+	if (LoadFrom(SavePath(), Error))
+		Toast(FString::Printf(TEXT("Loaded (%d edited bricks, %d structures)"), Terrain->GetEdits()->NumBricks(),
+			Planet->GetStructures()->GetSet().All().Num()), FLinearColor(0.6f, 1.f, 0.6f));
+	else
+		Toast(Error, FLinearColor(1.f, 0.3f, 0.3f));
+}
+
+bool AAstronautPawn::SaveTo(const FString& Path, FString& OutError)
+{
 	FBufferArchive Ar;
 	uint32 Magic = SaveMagic;
 	int32 Version = SaveVersion;
 	double Radius = Terrain->RadiusMeters;
 	int32 Seed = Terrain->Seed;
-	FVector3d Position = bFreeCam ? FreeCamPosition : State.Position;
 	Ar << Magic << Version << Radius << Seed;
-	Ar << Position << Heading << Pitch;
-	Ar << Suit.Power << Suit.bGodMode << PaceSetting << RadiusSetting;
-	Inventory.Serialize(Ar);
-	Credit.Serialize(Ar);
-	const_cast<FTerrainEdits&>(EditsCopy).Serialize(Ar);
+
+	FBufferArchive Body;
+	auto Section = [&Body](uint32 Id, TFunctionRef<void(FArchive&)> Write)
+	{
+		FBufferArchive Payload;
+		Write(Payload);
+		int64 Size = Payload.Num();
+		Body << Id << Size;
+		Body.Serialize(Payload.GetData(), Payload.Num());
+	};
+	Section(Tag("PLYR"), [this](FArchive& A)
+	{
+		FVector3d Position = Mode == EViewMode::Walk ? State.Position : Mode == EViewMode::FreeCam ? FreeCamPosition : State.Position;
+		A << Position << Heading << Pitch << Suit.Power << Suit.bGodMode << PaceSetting << RadiusSetting;
+	});
+	Section(Tag("INVT"), [this](FArchive& A)
+	{
+		Inventory.Serialize(A);
+		Credit.Serialize(A);
+	});
+	Section(Tag("EDIT"), [this](FArchive& A)
+	{
+		FTerrainEdits Copy = *Terrain->GetEdits();
+		Copy.Serialize(A);
+	});
+	Section(Tag("STRC"), [this](FArchive& A) { Planet->GetStructures()->GetSet().Serialize(A); });
+	Section(Tag("FLUD"), [this](FArchive& A) { Planet->GetFluids()->Serialize(A); });
+	Section(Tag("SITE"), [this](FArchive& A)
+	{
+		bool bSite = Planet->HasTestSite();
+		A << bSite;
+	});
+
+	// Compress the body (edit bricks are mostly smooth offsets: several times smaller).
+	int64 RawSize = Body.Num();
+	int32 Packed = FCompression::CompressMemoryBound(NAME_Oodle, int32(RawSize));
+	TArray<uint8> Compressed;
+	Compressed.SetNumUninitialized(Packed);
+	if (!FCompression::CompressMemory(NAME_Oodle, Compressed.GetData(), Packed, Body.GetData(), int32(RawSize)))
+	{
+		OutError = TEXT("could not compress the save");
+		return false;
+	}
+	Ar << RawSize << Packed;
+	Ar.Serialize(Compressed.GetData(), Packed);
 
 	// Write a temporary file, then replace: the previous save is kept as a backup.
-	const FString Path = SavePath(), Temp = Path + TEXT(".tmp"), Backup = Path + TEXT(".bak");
+	const FString Temp = Path + TEXT(".tmp"), Backup = Path + TEXT(".bak");
 	if (!FFileHelper::SaveArrayToFile(Ar, *Temp))
 	{
-		Toast(TEXT("Save failed: could not write the file"), FLinearColor(1.f, 0.3f, 0.3f));
-		return;
+		OutError = TEXT("could not write the file");
+		return false;
 	}
 	IFileManager& FM = IFileManager::Get();
 	if (FM.FileExists(*Path))
 		FM.Move(*Backup, *Path, true);
 	FM.Move(*Path, *Temp, true);
-	Toast(FString::Printf(TEXT("Saved (%d edited bricks)"), EditsCopy.NumBricks()), FLinearColor(0.6f, 1.f, 0.6f));
+	return true;
 }
 
-void AAstronautPawn::LoadGame()
+bool AAstronautPawn::LoadFrom(const FString& Path, FString& OutError)
 {
-	if (!State.bGrounded && !bFreeCam)
-	{
-		Toast(TEXT("Load while standing on the ground"), FLinearColor(1.f, 0.6f, 0.3f));
-		return;
-	}
 	TArray<uint8> Bytes;
-	if (!FFileHelper::LoadFileToArray(Bytes, *SavePath()))
+	if (!FFileHelper::LoadFileToArray(Bytes, *Path))
 	{
-		Toast(TEXT("No save to load"), FLinearColor(1.f, 0.6f, 0.3f));
-		return;
+		OutError = TEXT("No save to load");
+		return false;
 	}
 	FMemoryReader Ar(Bytes);
 	uint32 Magic = 0;
 	int32 Version = 0, Seed = 0;
 	double Radius = 0;
 	Ar << Magic << Version << Radius << Seed;
-	if (Magic != SaveMagic || Version != SaveVersion || Radius != Terrain->RadiusMeters || Seed != Terrain->Seed)
+	if (Magic != SaveMagic || Version < 1 || Version > SaveVersion || Radius != Terrain->RadiusMeters || Seed != Terrain->Seed)
 	{
-		Toast(TEXT("Save is for another planet or version"), FLinearColor(1.f, 0.3f, 0.3f));
-		return;
+		OutError = TEXT("Save is for another planet or version");
+		return false;
 	}
+
+	// Everything is read and validated before the running world changes.
 	FVector3d Position, NewHeading;
 	double NewPitch = 0, Power = 0, Pace = 1, Brush = 2.5;
 	bool bGod = false;
 	FInventory NewInventory;
 	FMiningCredit NewCredit;
 	TSharedRef<FTerrainEdits> NewEdits = MakeShared<FTerrainEdits>(Terrain->GetTerrain().LeafStride());
-	Ar << Position << NewHeading << NewPitch;
-	Ar << Power << bGod << Pace << Brush;
-	NewInventory.Serialize(Ar);
-	NewCredit.Serialize(Ar);
-	NewEdits->Serialize(Ar);
-	// Validate everything before changing the running world.
+	FStructureSet NewStructures;
+	TArray<uint8> Fluids;
+	bool bHasStructures = false, bSite = false;
+	auto ReadPlayer = [&](FArchive& A) { A << Position << NewHeading << NewPitch << Power << bGod << Pace << Brush; };
+	if (Version == 1)
+	{
+		// Version 1: one fixed layout, no structures or water.
+		ReadPlayer(Ar);
+		NewInventory.Serialize(Ar);
+		NewCredit.Serialize(Ar);
+		NewEdits->Serialize(Ar);
+	}
+	else
+	{
+		int64 RawSize = 0;
+		int32 Packed = 0;
+		Ar << RawSize << Packed;
+		if (Ar.IsError() || RawSize < 0 || RawSize > (int64(1) << 31) || Packed < 0 || Ar.Tell() + Packed > Ar.TotalSize())
+		{
+			OutError = TEXT("Save is damaged");
+			return false;
+		}
+		TArray<uint8> Raw;
+		Raw.SetNumUninitialized(int32(RawSize));
+		if (!FCompression::UncompressMemory(NAME_Oodle, Raw.GetData(), int32(RawSize), Bytes.GetData() + Ar.Tell(), Packed))
+		{
+			OutError = TEXT("Save is damaged");
+			return false;
+		}
+		FMemoryReader Body(Raw);
+		while (!Body.AtEnd() && !Body.IsError())
+		{
+			uint32 Id = 0;
+			int64 Size = 0;
+			Body << Id << Size;
+			const int64 End = Body.Tell() + Size;
+			if (Size < 0 || End > Body.TotalSize())
+			{
+				OutError = TEXT("Save is damaged");
+				return false;
+			}
+			if (Id == Tag("PLYR")) ReadPlayer(Body);
+			else if (Id == Tag("INVT")) { NewInventory.Serialize(Body); NewCredit.Serialize(Body); }
+			else if (Id == Tag("EDIT")) NewEdits->Serialize(Body);
+			else if (Id == Tag("STRC")) { NewStructures.Serialize(Body); bHasStructures = true; }
+			else if (Id == Tag("FLUD")) { Fluids.SetNumUninitialized(int32(Size)); Body.Serialize(Fluids.GetData(), Size); }
+			else if (Id == Tag("SITE")) Body << bSite;
+			// Unknown sections (from newer builds) are skipped.
+			Body.Seek(End);
+		}
+		if (Body.IsError())
+		{
+			OutError = TEXT("Save is damaged");
+			return false;
+		}
+	}
 	if (Ar.IsError() || Position.ContainsNaN() || NewHeading.ContainsNaN() || !FMath::IsFinite(Power)
 		|| !FMath::IsNearlyEqual(NewEdits->GetSpacing(), Terrain->GetTerrain().LeafStride()))
 	{
-		Toast(TEXT("Save is damaged"), FLinearColor(1.f, 0.3f, 0.3f));
-		return;
+		OutError = TEXT("Save is damaged");
+		return false;
 	}
+
 	Terrain->SetEdits(NewEdits);
-	bFreeCam = false;
+	if (bSite && !Planet->HasTestSite())
+		Terrain->MutableTerrain().Field.SetDeposits(FTestSitePlan::Build(Terrain->GetTerrain(), Planet->SiteSurface, Planet->SiteUp, Planet->SiteForward).Deposits);
+	AStructuresActor* S = Planet->GetStructures();
+	S->GetSet() = bHasStructures ? NewStructures : FStructureSet();
+	S->Rebuild();
+	if (Fluids.Num() > 0)
+	{
+		FMemoryReader FA(Fluids);
+		Planet->GetFluids()->Serialize(FA);
+	}
+
+	SetMode(EViewMode::Walk, Cast<APlayerController>(GetController()));
 	State = FCharacterState();
 	State.Position = Position;
 	DropToGround();
@@ -669,5 +1083,5 @@ void AAstronautPawn::LoadGame()
 	Credit = NewCredit;
 	bFlightActive = false;
 	JumpJet.Reset();
-	Toast(FString::Printf(TEXT("Loaded (%d edited bricks)"), NewEdits->NumBricks()), FLinearColor(0.6f, 1.f, 0.6f));
+	return true;
 }

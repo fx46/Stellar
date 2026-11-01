@@ -26,7 +26,8 @@ public:
 
 	FPlanetTerrain(double Radius, int32 Seed = 1337, double LeafSize = 8.0, double SplitFactor = 2.0);
 
-	const FPlanetField Field;
+	/** The field. Mutable only for setup (deposits), before meshing starts. */
+	FPlanetField Field;
 	const FPlanetOctree Octree;
 
 	/** Lattice spacing of the finest nodes, and of the edit lattice (metres). */
@@ -68,7 +69,10 @@ public:
 
 	/** The vertex colour at a node-local vertex: the surface's colour on original ground, the
 	 * rock's in a cut (so cuts show the strata). */
-	FColor VertexColor(const FVector3d& NodeMin, const FVector3f& Local, const FVector3f& Normal, bool bEdited, float Stride) const;
+	FColor VertexColor(const FVector3d& NodeMin, const FVector3f& Local, const FVector3f& Normal, const FTerrainEdits* Edits, float Stride) const;
+
+	/** What the rock is at P (planet frame), edits included: fill where something was built. */
+	FGeoSample RockAt(const FVector3d& P, const FTerrainEdits* Edits) const;
 
 	int32 CachedNodes() const;
 

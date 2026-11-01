@@ -62,7 +62,7 @@ FVector APlanetTerrainActor::PlanetDirToWorld(const FVector3d& Dir) const
 	return GetActorQuat().RotateVector(Dir);
 }
 
-bool APlanetTerrainActor::RequestEdit(const FSculptOp& Op, TFunction<void(const FEditResult&)> OnDone)
+bool APlanetTerrainActor::RequestEdit(const FEditOp& Op, TFunction<void(const FEditResult&)> OnDone)
 {
 	if (!Terrain.IsValid() || EditJob.IsValid())
 		return false;
@@ -76,6 +76,15 @@ bool APlanetTerrainActor::RequestEdit(const FSculptOp& Op, TFunction<void(const 
 		return R;
 	});
 	return true;
+}
+
+FEditResult APlanetTerrainActor::ApplyNow(TConstArrayView<FEditOp> Ops)
+{
+	WaitForJobs();
+	FEditResult Result;
+	Edits = Edits->ApplyAll(Ops, Terrain->Field, Result);
+	OnEdited.Broadcast(Result);
+	return Result;
 }
 
 void APlanetTerrainActor::SetEdits(TSharedRef<const FTerrainEdits> NewEdits)
@@ -117,6 +126,7 @@ void APlanetTerrainActor::Tick(float DeltaSeconds)
 			EditDone.Reset();
 			Done(R.Result);
 		}
+		OnEdited.Broadcast(R.Result);
 	}
 
 	if (Job.IsValid())
@@ -182,12 +192,20 @@ APlanetTerrainActor::FJobResult APlanetTerrainActor::RunJob(TSharedRef<FPlanetTe
 		if (Mesh.IsEmpty())
 			return;
 		TSharedPtr<FNodeMeshData> Data = MakeShared<FNodeMeshData>();
-		Data->Vertices.SetNumUninitialized(Mesh.Vertices.Num());
-		Data->Normals.SetNumUninitialized(Mesh.Normals.Num());
-		for (int32 V = 0; V < Mesh.Vertices.Num(); V++)
+		const int32 Count = Mesh.Vertices.Num();
+		Data->Vertices.SetNumUninitialized(Count);
+		Data->Normals.SetNumUninitialized(Count);
+		Data->UV0.SetNumUninitialized(Count);
+		Data->UV1.SetNumUninitialized(Count);
+		const FVector3d Min = Terrain->Octree.Min(K);
+		auto Wrap = [](double V) { const double W = FMath::Fmod(V, 4096.0); return W < 0 ? W + 4096.0 : W; };
+		for (int32 V = 0; V < Count; V++)
 		{
 			Data->Vertices[V] = FVector(Mesh.Vertices[V]) * UU;
 			Data->Normals[V] = FVector(Mesh.Normals[V]);
+			const FVector3d P = Min + FVector3d(Mesh.Vertices[V]);
+			Data->UV0[V] = FVector2D(Wrap(P.X), Wrap(P.Y));
+			Data->UV1[V] = FVector2D(Wrap(P.Z), 0.0);
 		}
 		Data->Colors = MoveTemp(Mesh.Colors);
 		Data->Triangles = MoveTemp(Mesh.Indices);
@@ -221,8 +239,8 @@ void APlanetTerrainActor::Apply(FJobResult& Result)
 			FNodeMeshData& Data = *Pair.Value;
 			UProceduralMeshComponent* C = AcquireComponent();
 			C->SetRelativeLocation(Terrain->Octree.Min(K) * UU);
-			C->CreateMeshSection(0, Data.Vertices, Data.Triangles, Data.Normals, TArray<FVector2D>(), Data.Colors,
-				TArray<FProcMeshTangent>(), false);
+			C->CreateMeshSection(0, Data.Vertices, Data.Triangles, Data.Normals, Data.UV0, Data.UV1, TArray<FVector2D>(),
+				TArray<FVector2D>(), Data.Colors, TArray<FProcMeshTangent>(), false);
 			C->SetMaterial(0, TerrainMaterial);
 			C->SetVisibility(true);
 			B.Component = C;

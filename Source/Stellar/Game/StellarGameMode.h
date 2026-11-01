@@ -14,4 +14,5 @@ public:
 	AStellarGameMode();
 
 	virtual void InitGame(const FString& MapName, const FString& Options, FString& ErrorMessage) override;
+	virtual void StartPlay() override;
 };

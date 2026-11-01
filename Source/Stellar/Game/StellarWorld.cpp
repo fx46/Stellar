@@ -1,6 +1,12 @@
 #include "Game/StellarWorld.h"
 #include "Stellar.h"
 #include "Terrain/PlanetTerrainActor.h"
+#include "Terrain/FluidActor.h"
+#include "Game/Structures.h"
+#include "Components/PostProcessComponent.h"
+#include "Components/VolumetricCloudComponent.h"
+#include "Misc/CommandLine.h"
+#include "Misc/Parse.h"
 #include "Components/DirectionalLightComponent.h"
 #include "Components/SkyAtmosphereComponent.h"
 #include "Components/SkyLightComponent.h"
@@ -57,6 +63,25 @@ AStellarWorld::AStellarWorld()
 	SkyLight->SetMobility(EComponentMobility::Movable);
 	SkyLight->bRealTimeCapture = true;
 	SkyLight->SetIntensity(1.f);
+
+	// Clouds over the plain: scale cues kilometres up (milestone 0 step 4).
+	Clouds = CreateDefaultSubobject<UVolumetricCloudComponent>(TEXT("Clouds"));
+	Clouds->SetupAttachment(Root);
+	Clouds->SetLayerBottomAltitude(6.f);
+	Clouds->SetLayerHeight(5.f);
+
+	// Exposure kept to a daylight band, so a shadowed pit reads dark instead of being lifted to
+	// noon, and cave darkness is real (the helmet lamp is for that).
+	PostProcess = CreateDefaultSubobject<UPostProcessComponent>(TEXT("PostProcess"));
+	PostProcess->SetupAttachment(Root);
+	PostProcess->bUnbound = true;
+	FPostProcessSettings& S = PostProcess->Settings;
+	S.bOverride_AutoExposureMinBrightness = true;
+	S.bOverride_AutoExposureMaxBrightness = true;
+	S.bOverride_AutoExposureBias = true;
+	S.AutoExposureMinBrightness = 0.5f;
+	S.AutoExposureMaxBrightness = 4.f;
+	S.AutoExposureBias = -0.3f;
 }
 
 AStellarWorld* AStellarWorld::Get(UWorld* World)
@@ -95,6 +120,10 @@ void AStellarWorld::EnsureBuilt()
 	Solid = LoadObject<UMaterialInterface>(nullptr, TEXT("/Game/Materials/M_Solid.M_Solid"));
 	if (Solid == nullptr)
 		Solid = LoadObject<UMaterialInterface>(nullptr, TEXT("/Engine/BasicShapes/BasicShapeMaterial.BasicShapeMaterial"));
+	Ghost = LoadObject<UMaterialInterface>(nullptr, TEXT("/Game/Materials/M_Ghost.M_Ghost"));
+	Water = LoadObject<UMaterialInterface>(nullptr, TEXT("/Game/Materials/M_Water.M_Water"));
+	if (UMaterialInterface* CloudMaterial = LoadObject<UMaterialInterface>(nullptr, TEXT("/Engine/EngineSky/VolumetricClouds/m_SimpleVolumetricCloud_Inst.m_SimpleVolumetricCloud_Inst")))
+		Clouds->SetMaterial(CloudMaterial);
 	Cursor = LoadObject<UMaterialInterface>(nullptr, TEXT("/Game/Materials/M_BrushCursor.M_BrushCursor"));
 	if (Cursor == nullptr)
 		Cursor = LoadObject<UMaterialInterface>(nullptr, TEXT("/Engine/EngineDebugMaterials/VertexColorMaterial.VertexColorMaterial"));
@@ -121,9 +150,13 @@ void AStellarWorld::EnsureBuilt()
 	const FVector Centre = -Rotation.RotateVector(SiteSurface * UU);
 	Terrain->SetPlanetTransform(Centre, Rotation);
 
-	// The sky's planet: concentric with the terrain, its ground at the site (world origin).
+	// The sky's planet: concentric with the terrain, its ground at the site (world origin). A
+	// little more dust than Earth's air (Mie) for aerial perspective across tens of kilometres.
 	Atmosphere->SetBottomRadius(float((Terrain->RadiusMeters + SiteHeight) / 1000.0));
 	Atmosphere->SetAtmosphereHeight(80.f);
+	Atmosphere->SetMieScatteringScale(0.0075f);
+	Atmosphere->SetMieExponentialDistribution(1.6f);
+	Atmosphere->SetAerialPespectiveViewDistanceScale(1.25f);
 
 	// Afternoon light, low and to the right of the view.
 	const double Elevation = FMath::DegreesToRadians(17.0), Azimuth = FMath::DegreesToRadians(65.0);
@@ -131,70 +164,83 @@ void AStellarWorld::EnsureBuilt()
 	Sun->SetWorldRotation((-Terrain->PlanetDirToWorld(SunDirection)).Rotation());
 
 	PlaceStandIns();
+
+	Structures = GetWorld()->SpawnActor<AStructuresActor>(FVector::ZeroVector, FRotator::ZeroRotator, Params);
+	Structures->Setup(this, Terrain);
+	Fluids = GetWorld()->SpawnActor<AFluidActor>(FVector::ZeroVector, FRotator::ZeroRotator, Params);
+	Fluids->Setup(Terrain, Water != nullptr ? Water.Get() : SolidMaterial(FLinearColor(0.02f, 0.08f, 0.12f), 0.05f));
+
+	if (!FParse::Param(FCommandLine::Get(), TEXT("notestsite")))
+		BuildTestSite();
+}
+
+void AStellarWorld::BuildTestSite()
+{
+	const double T0 = FPlatformTime::Seconds();
+	TestSite = FTestSitePlan::Build(Terrain->GetTerrain(), SiteSurface, SiteUp, SiteForward);
+	Terrain->MutableTerrain().Field.SetDeposits(TestSite.Deposits);
+	Terrain->ApplyNow(TestSite.Ops);
+	for (const FTestSitePlan::FMarker& M : TestSite.Structures)
+	{
+		FPlacementCheck Where = Structures->Check(M.Type, M.Position, M.Forward);
+		Where.bValid = true; // authored: placed even where the check would ask for grading
+		Structures->Place(Where, M.Type);
+	}
+	const int32 Surface = Fluids->AddRegion(TestSite.SurfaceWater);
+	FFluidSpring Spring;
+	Spring.Position = TestSite.Spring;
+	Spring.Rate = 0.8;
+	Spring.Remaining = 160;
+	Fluids->AddSpring(Surface, Spring);
+	const int32 Aquifer = Fluids->AddRegion(TestSite.Aquifer);
+	Fluids->Region(Aquifer).FillSphere(TestSite.Pocket, TestSite.PocketRadius);
+	bTestSite = true;
+	UE_LOG(LogStellar, Log, TEXT("Test site built in %.0f ms: %d edits, %d bricks (%.1f MB), %.0f m3 of water in the pocket"),
+		(FPlatformTime::Seconds() - T0) * 1000.0, TestSite.Ops.Num(), Terrain->GetEdits()->NumBricks(),
+		Terrain->GetEdits()->BrickBytes() / (1024.0 * 1024.0), Fluids->Region(Aquifer).CubicMetres());
+}
+
+bool AStellarWorld::FindLandmark(FVector3d& OutPoint, FString& OutKind) const
+{
+	// Rings of samples around the site, out to 40 km: the nearest mesa or spire.
+	const FPlanetField& F = Terrain->GetTerrain().Field;
+	const double R = F.GetRadius();
+	FVector3d North, East;
+	Tangents(SiteUp, North, East);
+	for (double D = 2000; D <= 40000; D += 1000)
+		for (int32 A = 0; A < 72; A++)
+		{
+			const FVector3d U = Walk(SiteUp, North, East, A * UE_DOUBLE_PI / 36, D, R);
+			const FHeightLayers L = F.Layers(U.X * R, U.Y * R, U.Z * R);
+			if (L.Mesa > 300 || L.Spire > 150)
+			{
+				OutPoint = U * (R + L.Total());
+				OutKind = L.Mesa > 300 ? TEXT("mesa") : TEXT("spire field");
+				return true;
+			}
+		}
+	return false;
+}
+
+UMaterialInterface* AStellarWorld::GhostMaterial(const FLinearColor& Color)
+{
+	if (Ghost == nullptr)
+		return SolidMaterial(Color, 0.5f, 0.f, 2.f);
+	UMaterialInstanceDynamic* M = UMaterialInstanceDynamic::Create(Ghost, this);
+	M->SetVectorParameterValue(TEXT("Color"), Color);
+	Instances.Add(M);
+	return M;
 }
 
 void AStellarWorld::ChooseSite()
 {
-	const FPlanetField& F = Terrain->GetTerrain().Field;
-	const double R = F.GetRadius();
-	const double Cap = FMath::Min(UE_DOUBLE_PI, 200000.0 / R);
-	const double Distances[] = { 15000, 19000, 24000, 30000, 36000, 42000 };
-	double Best = -TNumericLimits<double>::Max();
-	constexpr int32 Candidates = 700;
-	for (int32 I = 0; I < Candidates; I++)
-	{
-		// Fibonacci points over the cap around +Z.
-		const double CosT = 1 - (1 - FMath::Cos(Cap)) * (I + 0.5) / Candidates;
-		const double SinT = FMath::Sqrt(1 - CosT * CosT);
-		const double Phi = I * UE_DOUBLE_PI * (3 - FMath::Sqrt(5.0));
-		const FVector3d U(SinT * FMath::Cos(Phi), SinT * FMath::Sin(Phi), CosT);
-		const FHeightLayers L = F.Layers(U.X * R, U.Y * R, U.Z * R);
-		if (L.RangeMask > 0.02 || (L.Escarp > 30 && L.Escarp < 420))
-			continue; // not open plain (nor on an escarpment's slope)
-		const double H0 = L.Total();
-		FVector3d North, East;
-		Tangents(U, North, East);
-		// Flat: the ground 30 m around varies by under 2.5 m.
-		bool bFlat = true;
-		for (int32 B = 0; B < 4 && bFlat; B++)
-			bFlat = FMath::Abs(F.Height(Walk(U, North, East, B * UE_DOUBLE_PI / 2, 30, R)) - H0) < 2.5;
-		if (!bFlat)
-			continue;
-		const double Eye = R + H0 + 1.7;
-		double Score = -TNumericLimits<double>::Max(), Bearing = 0, Ridge = 0;
-		for (int32 B = 0; B < 24; B++)
-		{
-			const double Az = B * UE_DOUBLE_PI / 12;
-			for (double D : Distances)
-			{
-				const double Rq = R + F.Height(Walk(U, North, East, Az, D, R));
-				const double Theta = D / R;
-				const double Elev = FMath::Atan2(Rq * FMath::Cos(Theta) - Eye, Rq * FMath::Sin(Theta));
-				if (Elev > Score)
-				{
-					Score = Elev;
-					Bearing = Az;
-					Ridge = D;
-				}
-			}
-		}
-		if (Score > Best)
-		{
-			Best = Score;
-			SiteUp = U;
-			SiteHeight = H0;
-			RidgeElevationDeg = FMath::RadiansToDegrees(Score);
-			RidgeDistance = Ridge;
-			SiteForward = North * FMath::Cos(Bearing) + East * FMath::Sin(Bearing);
-		}
-	}
-	if (Best == -TNumericLimits<double>::Max())
-	{
-		SiteUp = FVector3d(0, 0, 1);
-		SiteHeight = F.Height(SiteUp);
-		SiteForward = FVector3d(1, 0, 0);
-	}
-	SiteSurface = SiteUp * (R + SiteHeight);
+	const FSiteChoice C = ChooseStartSite(Terrain->GetTerrain());
+	SiteUp = C.Up;
+	SiteForward = C.Forward;
+	SiteHeight = C.Height;
+	SiteSurface = C.Surface;
+	RidgeDistance = C.RidgeDistance;
+	RidgeElevationDeg = C.RidgeElevationDeg;
 }
 
 UMaterialInterface* AStellarWorld::SolidMaterial(const FLinearColor& Color, float Roughness, float Metallic, float Emissive)

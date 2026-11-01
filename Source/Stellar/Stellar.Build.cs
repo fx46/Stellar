@@ -12,5 +12,7 @@ public class Stellar : ModuleRules
 		{
 			"Core", "CoreUObject", "Engine", "InputCore", "ProceduralMeshComponent"
 		});
+
+		PrivateDependencyModuleNames.AddRange(new string[] { "RHI" });
 	}
 }
