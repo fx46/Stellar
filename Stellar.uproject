@@ -1,8 +1,8 @@
 {
 	"FileVersion": 3,
-	"EngineAssociation": "5.4",
+	"EngineAssociation": "5.8",
 	"Category": "",
-	"Description": "",
+	"Description": "Stellar: a robotic industrial civilization on a 1000 km deformable planet.",
 	"Modules": [
 		{
 			"Name": "Stellar",
@@ -15,11 +15,26 @@
 	],
 	"Plugins": [
 		{
-			"Name": "ModelingToolsEditorMode",
+			"Name": "ProceduralMeshComponent",
+			"Enabled": true
+		},
+		{
+			"Name": "PythonScriptPlugin",
 			"Enabled": true,
 			"TargetAllowList": [
 				"Editor"
 			]
+		},
+		{
+			"Name": "EditorScriptingUtilities",
+			"Enabled": true,
+			"TargetAllowList": [
+				"Editor"
+			]
+		},
+		{
+			"Name": "ModelingToolsEditorMode",
+			"Enabled": false
 		}
 	]
 }
