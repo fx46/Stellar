@@ -138,6 +138,10 @@ public:
 	/** Linear colour of a material at P (for cut faces); regolith uses the surface colour. */
 	FLinearColor MaterialColor(EGeoMaterial Material, const FVector3d& P) const;
 
+	/** Exposed rock on a cliff: layered strata (board image 14) - broad bands that read from
+	 * kilometres away, and the sandstone's fine bands close up (Stride: the mesh's cell size). */
+	FLinearColor CliffColor(const FVector3d& P, const FHeightLayers& L, double Stride) const;
+
 	/** The surface's colour: dusty ochre plain, darker rock where steep, paler stone high up. */
 	FLinearColor SurfaceColor(const FHeightLayers& L, double AboveRadius, float Slope) const;
 

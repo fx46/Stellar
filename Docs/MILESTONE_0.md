@@ -9,8 +9,9 @@ NVIDIA GeForce RTX 5080, AMD Ryzen 7 9800X3D (16 logical cores), 62 GB RAM, Deve
 ## Step by step
 
 1. **Scale through ground-level compositions.** The 1000 km home planet carries the scale
-   study's stand-ins (a 1.8 m person, a 1.4 m robot, a 34 m drill crawler, a brutalist
-   megastructure 1.6 km long and 340 m tall). The same compositions are produced at eye
+   study's stand-ins, kitbashed after the moodboard: a 1.8 m person, a six-wheeled rover, a
+   34 m tracked drill crawler, a 52 m walking factory on six legs, and a brutalist
+   megastructure 1.6 km long and 340 m tall. The same compositions are produced at eye
    height, 150 m, 2 km and 30 km.
 2. **Bounded residency.** The level-of-detail octree around the camera bounds what is
    rendered. Edits are sparse copy-on-write bricks (`FTerrainEdits`), allocated only where
@@ -24,10 +25,11 @@ NVIDIA GeForce RTX 5080, AMD Ryzen 7 9800X3D (16 logical cores), 62 GB RAM, Deve
    sandstone with iron sheets, basalt with copper pockets and deeper quartz, each with
    hardness; the strata show in every cut. Built ground is recorded as fill.
 4. **Atmospheric distance and scale cues.** A sky atmosphere concentric with the planet with
-   dustier air for aerial perspective, volumetric clouds 6-11 km up, a warm low accretion
-   light, exposure kept to a daylight band, a helmet lamp for caves. The terrain material adds
-   detail noise at three scales, read from wrapped planet coordinates so it stays precise
-   anywhere on the planet.
+   dustier air for aerial perspective, volumetric clouds 6-11 km up, a warm accretion light
+   that can be moved (`[` / `]`), exposure kept to a daylight band, a helmet lamp for caves.
+   Steep ground shows strata; stones, rocks and boulders are scattered over the near ground.
+   The terrain material adds detail noise at three scales, read from wrapped planet
+   coordinates so it stays precise anywhere on the planet.
 5. **Coordinates at scale.** Unreal's large world coordinates plus node-local meshes evaluated
    from double-precision node origins. The plan's open decision, a double-precision engine
    build versus rebasing, needs neither. The density from a node origin plus a float offset
@@ -43,13 +45,40 @@ gate asks for.
 
 | | |
 |---|---|
-| ![](milestone0/01_eye.jpg) Eye height: the person and robot small in the foreground, the crawler at its site, the megastructure 2.6 km out against the dunes, ridges 15 km away under clouds. | ![](milestone0/03_landmark_mesa_37km.jpg) A mesa 37 km away on the horizon, softened by aerial perspective. |
-| ![](milestone0/05_rise_2km.jpg) 2 km up: new terrain keeps appearing rather than the whole world. | ![](milestone0/06_high_30km.jpg) 30 km up: open country on a gently curved horizon. |
+| ![](milestone0/01_eye.jpg) Eye height: the person and rover small in the foreground, the crawler at its site, scattered rocks, ridges 15 km away under clouds. | ![](milestone0/03_landmark_mesa_37km.jpg) A mesa 37 km away on the horizon, softened by aerial perspective. |
+| ![](milestone0/05_rise_2km.jpg) 2 km up: new terrain keeps appearing rather than the whole world; the megastructure bottom left. | ![](milestone0/06_high_30km.jpg) 30 km up: open country on a gently curved horizon. |
 | ![](milestone0/08_ramp.jpg) The test site's ramp: banded sandstone with iron in its walls, the tunnel at the foot. | ![](milestone0/10_cavern_copper_in_basalt.jpg) The cavern by lamplight: copper in basalt. |
 
-What remains for the art gate: the stand-ins are still primitive boxes, rock is vertex colour
-with procedural detail rather than authored materials, and the sun angle is fixed. Judge the
-"realistic sci-fi" register from these as a baseline, not a finish.
+### Art pass against the moodboard (2026-11-02)
+
+The board's export was reviewed image by image ([MOODBOARD.md](MOODBOARD.md)), and the build was
+moved toward it. The tour now ends with four of the board's machine compositions:
+
+| | |
+|---|---|
+| ![](milestone0/15_golden_hour_machines.jpg) Golden hour: the crawler, the walker and the megastructure in silhouette against the low sun, through dusty air. | ![](milestone0/16_under_the_crawler.jpg) From eye height beside the drill crawler: tracks, the toothed drill head, stacks and work lights. |
+| ![](milestone0/17_walking_factory.jpg) The walking factory, a mobile factory on six legs. | ![](milestone0/18_megastructure_haze.jpg) The megastructure from 2.8 km, against the ranges. |
+
+What changed:
+- **Air and light.** Dustier, warmer air for deeper aerial perspective. The sun can be moved
+  (`[` / `]`, with Shift around the horizon), and the tour sets it per composition.
+- **Ground.** Stones, rocks and boulders are scattered within 150 m of the camera. They are
+  seeded by position, kept off steep and edited ground, and cleared around the site and the
+  machines. Cliffs, mesas and escarpments show strata. The ground's "cracked mud" cells were
+  a precision artifact: the material read planet positions from the procedural mesh's UVs,
+  which are half floats. It now reads each node's origin from custom primitive data, plus
+  the local position.
+- **Machines.** The box stand-ins are now kitbashed from instanced parts (`Game/StandIns`):
+  tracks, legs, hulls, stacks, railings, windows, lamps and greebles, in industrial paint with
+  one accent colour. The megastructure stands on the flattest footprint near its place, so its
+  base is not buried in a dune.
+- **Tried and dropped.** Rock micro-relief bumped from screen-space derivatives of the
+  material's noise rendered as pixel blocks at every amplitude tried. It needs an authored
+  detail-normal texture.
+
+Still for later art passes: smoke and dust, authored rock materials and detail normals, wear
+and decals, vegetation for the board's hopeful register, and the cavern lighting palette.
+Judge the "realistic sci-fi" register from these as a stand-in stage, not a finish.
 
 ## Technical gate
 
@@ -58,13 +87,18 @@ then saves, clears and reloads ([full report](milestone0/trial_report.md)):
 
 | stop | distance | streaming | 6 bites to meshed | nodes | triangles | p50 / p95 / p99 frame |
 |---|---|---|---|---|---|---|
-| start site | 0 km | 0.22 s | 0.12 s | 1,374 | 2.24 M | 3.1 / 4.3 / 7.1 ms |
-| 25 km | 25 km | 3.65 s | 0.17 s | 2,131 | 2.60 M | 2.9 / 4.5 / 7.5 ms |
-| 120 km | 120 km | 2.10 s | 0.14 s | 1,491 | 2.52 M | 3.0 / 4.3 / 7.7 ms |
-| 400 km | 400 km | 4.38 s | 0.19 s | 2,604 | 3.14 M | 3.1 / 4.2 / 9.5 ms |
-| far side | 3,141 km | 5.36 s | 0.22 s | 3,337 | 3.28 M | 3.0 / 4.2 / 9.6 ms |
+| start site | 0 km | 0.19 s | 0.13 s | 1,374 | 2.24 M | 3.1 / 4.4 / 7.4 ms |
+| 25 km | 25 km | 3.19 s | 0.14 s | 2,131 | 2.60 M | 2.9 / 4.1 / 7.8 ms |
+| 120 km | 120 km | 2.07 s | 0.11 s | 1,491 | 2.52 M | 2.8 / 3.9 / 7.3 ms |
+| 400 km | 400 km | 3.61 s | 0.18 s | 2,604 | 3.14 M | 3.1 / 4.0 / 9.6 ms |
+| far side | 3,141 km | 4.85 s | 0.19 s | 3,338 | 3.28 M | 2.7 / 3.8 / 9.8 ms |
 
-Startup, from process start to the first complete cut, is 15 s; that includes engine start and
+These are from the final build of the art pass (rocks and kitbashed stand-ins included). An
+earlier run on the same build measured about 2 ms more per frame at every stop, the far side
+included, where none of the new scenery is drawn. A rerun gave the figures above, in line with
+runs before the art pass, so the difference looks like load on the machine, not the build.
+
+Startup, from process start to the first complete cut, is 14.5 s; that includes engine start and
 the test site's 3 s of authoring. Every check passes:
 - footing within 4 mm;
 - digging removes ground at every stop;
@@ -72,14 +106,14 @@ the test site's 3 s of authoring. Every check passes:
 - every cut survives save, clear and load;
 - structures and water survive too (the save is 10 MB, compressed).
 
-The far side is in night: the accretion light is a fixed direction.
+The far side is in night: the trial keeps the light where the start site has it.
 
 **Budget.** The trial's residency budget per view is 4,000 terrain nodes and 4.5 M triangles. A
-first guess of 2,500 nodes, set before any measurement, was exceeded on rugged ground (3,337
+first guess of 2,500 nodes, set before any measurement, was exceeded on rugged ground (3,338
 nodes at the far side) while frames stayed at 4.2 ms p95, so the budget was raised from the
 measurements. Resident memory levels off as the same ground is revisited (per stop, five laps):
-the first lap grows by about 660 MB as pools and caches reach their working size, then
-+85, +30 and +12 MB. The last lap is within +21 MB at every stop.
+the second lap adds 84-589 MB as pools and caches reach their working size, then at most
++114, +63 and +30 MB. The last lap is within +30 MB at every stop.
 
 ## 0b: the industrial test site
 
@@ -126,8 +160,9 @@ no migration.
 
 ## Still open
 
-- **Art direction.** An authored rock material set, a structure art kit beyond boxes, sun and
-  time of day, and a review of the compositions against the moodboard.
+- **Art direction.** An authored rock material set with detail normals, effects (smoke, dust),
+  wear and decals, a time-of-day cycle, and a fresh review of the compositions against the
+  moodboard.
 - **Planning view features** wanted by later milestones: overlays, area selection, the
   underground/section view (milestone 6).
 - **Measurements on target hardware.** The plan leaves the target hardware open; these numbers

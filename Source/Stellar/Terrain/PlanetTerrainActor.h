@@ -16,9 +16,6 @@ struct FNodeMeshData
 	TArray<FVector> Normals;
 	TArray<FColor> Colors;
 	TArray<int32> Triangles;
-	/** Planet-frame position (metres) wrapped to a 4096 m period - what the material's detail
-	 * noise reads, precise anywhere on the planet: UV0 = x, y; UV1 = z. */
-	TArray<FVector2D> UV0, UV1;
 };
 
 DECLARE_MULTICAST_DELEGATE_OneParam(FOnTerrainEdited, const FEditResult&);

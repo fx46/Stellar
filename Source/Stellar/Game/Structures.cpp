@@ -1,4 +1,5 @@
 #include "Game/Structures.h"
+#include "Stellar.h"
 #include "Game/StellarWorld.h"
 #include "Terrain/PlanetTerrainActor.h"
 #include "Components/StaticMeshComponent.h"
@@ -6,10 +7,7 @@
 #include "Materials/MaterialInstanceDynamic.h"
 #include "Serialization/Archive.h"
 
-namespace
-{
-	constexpr double UU = 100.0;
-}
+using Stellar::UU;
 
 // ---- engine-free set ----
 

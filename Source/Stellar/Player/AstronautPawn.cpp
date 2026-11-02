@@ -327,6 +327,16 @@ void AAstronautPawn::HandleInput(APlayerController* PC, float Dt)
 				Toast(Planet->GetFluids()->ToggleSpringAt(At) ? TEXT("Spring added") : TEXT("Spring removed"), FLinearColor(0.5f, 0.8f, 1.f));
 		}
 	}
+	// The light: [ and ] lower and raise it, with Shift they turn it around the horizon.
+	const int32 SunStep = (PC->WasInputKeyJustPressed(EKeys::RightBracket) ? 1 : 0) - (PC->WasInputKeyJustPressed(EKeys::LeftBracket) ? 1 : 0);
+	if (SunStep != 0)
+	{
+		if (bShift)
+			Planet->SetSun(Planet->GetSunElevation(), Planet->GetSunAzimuth() + SunStep * 15.0);
+		else
+			Planet->SetSun(Planet->GetSunElevation() + SunStep * 3.0, Planet->GetSunAzimuth());
+		Toast(FString::Printf(TEXT("Light %.0f deg up, %.0f deg around"), Planet->GetSunElevation(), Planet->GetSunAzimuth()));
+	}
 	if (PC->WasInputKeyJustPressed(EKeys::H))
 		bShowHints = !bShowHints;
 	if (PC->WasInputKeyJustPressed(EKeys::P))

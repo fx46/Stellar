@@ -1,4 +1,5 @@
 #include "Terrain/FluidActor.h"
+#include "Stellar.h"
 #include "Terrain/PlanetTerrainActor.h"
 #include "Terrain/TransvoxelMesher.h"
 #include "ProceduralMeshComponent.h"
@@ -6,9 +7,10 @@
 #include "HAL/PlatformTime.h"
 #include "Serialization/Archive.h"
 
+using Stellar::UU;
+
 namespace
 {
-	constexpr double UU = 100.0;
 	/** Simulation steps per second, and the most a frame may run (the rest waits). */
 	constexpr double StepHz = 30.0;
 	constexpr int32 MaxStepsPerFrame = 4;

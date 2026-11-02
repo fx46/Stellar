@@ -352,6 +352,27 @@ FLinearColor FPlanetField::MaterialColor(EGeoMaterial Material, const FVector3d&
 	}
 }
 
+FLinearColor FPlanetField::CliffColor(const FVector3d& P, const FHeightLayers& L, double Stride) const
+{
+	static const FLinearColor Light = FLinearColor::FromSRGBColor(FColor(176, 122, 80));
+	static const FLinearColor Dark = FLinearColor::FromSRGBColor(FColor(116, 66, 40));
+	static const FLinearColor GreyLight = FLinearColor::FromSRGBColor(FColor(132, 124, 116));
+	static const FLinearColor GreyDark = FLinearColor::FromSRGBColor(FColor(72, 68, 66));
+	// Height on the planet, gently warped, sets the layer: horizontal strata across a whole cliff.
+	const double Elevation = P.Length() - Radius + 6.0 * Noise.Sample(P.X / 400.0, P.Y / 400.0, P.Z / 400.0, 46);
+	const double Broad = 0.5 + 0.5 * FMath::Sin(Elevation * (2 * UE_DOUBLE_PI / 23.0)) * FMath::Sin(Elevation * (2 * UE_DOUBLE_PI / 61.0) + 1.3);
+	// The ranges are harder, greyer rock; plains' escarpments and mesas are sandstone.
+	const float Grey = float(FMath::Clamp(L.RangeMask * 1.6, 0.0, 1.0));
+	FLinearColor C = FMath::Lerp(FMath::Lerp(Dark, Light, float(Broad)), FMath::Lerp(GreyDark, GreyLight, float(Broad)), Grey);
+	if (Stride < 1.0)
+	{
+		// Close up, the fine bands too (fading out as the cells grow).
+		const double Fine = 0.5 + 0.5 * FMath::Sin(Elevation * 2.1);
+		C *= float(FMath::Lerp(1.0, 0.82 + 0.3 * Fine, 1.0 - Stride));
+	}
+	return C;
+}
+
 FLinearColor FPlanetField::SurfaceColor(const FHeightLayers& L, double AboveRadius, float Slope) const
 {
 	const float Tone = float(FMath::Clamp(0.5 + L.Basin / 1400 + L.Hills / 600, 0.0, 1.0));

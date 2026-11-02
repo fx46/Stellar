@@ -8,6 +8,7 @@
 class APlanetTerrainActor;
 class AStructuresActor;
 class AFluidActor;
+class ARockScatter;
 class UPostProcessComponent;
 class UVolumetricCloudComponent;
 class UDirectionalLightComponent;
@@ -42,6 +43,7 @@ public:
 	APlanetTerrainActor* GetTerrain() const { return Terrain; }
 	AStructuresActor* GetStructures() const { return Structures; }
 	AFluidActor* GetFluids() const { return Fluids; }
+	ARockScatter* GetRocks() const { return Rocks; }
 
 	/** The industrial test site (milestone 0b), laid out at startup unless -notestsite. */
 	const FTestSitePlan& GetTestSite() const { return TestSite; }
@@ -61,8 +63,19 @@ public:
 	double RidgeDistance = 0;
 	double RidgeElevationDeg = 0;
 
+	/** Where the megastructure stand-in stands (planet frame, its base). */
+	FVector3d MegastructureBase = FVector3d::ZeroVector;
+
+	/** The way its windowed face looks (planet frame). */
+	FVector3d MegastructureFace = FVector3d::ZeroVector;
+
 	/** Towards the light (planet frame). */
 	FVector3d SunDirection = FVector3d(0, 0, 1);
+
+	/** Place the light: elevation above the site's horizon and azimuth from its view (degrees). */
+	void SetSun(double ElevationDeg, double AzimuthDeg);
+	double GetSunElevation() const { return SunElevationDeg; }
+	double GetSunAzimuth() const { return SunAzimuthDeg; }
 
 	/** A shared solid-colour material instance for stand-ins and gadgets. */
 	UMaterialInterface* SolidMaterial(const FLinearColor& Color, float Roughness, float Metallic = 0.f, float Emissive = 0.f);
@@ -83,9 +96,6 @@ private:
 	void ChooseSite();
 	void PlaceStandIns();
 	USceneComponent* Group(double Forward, double Side, float YawDeg, double Sink = 0.05);
-	void Box(USceneComponent* Parent, UMaterialInterface* M, const FVector3f& At, const FVector3f& Size);
-	void Sphere(USceneComponent* Parent, UMaterialInterface* M, const FVector3f& At, float Radius);
-	void Cylinder(USceneComponent* Parent, UMaterialInterface* M, const FVector3f& At, float TopRadius, float BottomRadius, float Height, const FRotator& Rotation);
 
 	UPROPERTY(VisibleAnywhere)
 	TObjectPtr<USceneComponent> Root;
@@ -110,6 +120,9 @@ private:
 
 	UPROPERTY(Transient)
 	TObjectPtr<AFluidActor> Fluids;
+
+	UPROPERTY(Transient)
+	TObjectPtr<ARockScatter> Rocks;
 
 	UPROPERTY(Transient)
 	TObjectPtr<UMaterialInterface> Ghost;
@@ -139,6 +152,7 @@ private:
 	TObjectPtr<UStaticMesh> ConeMesh;
 
 	bool bBuilt = false;
+	double SunElevationDeg = 17, SunAzimuthDeg = 65;
 	bool bTestSite = false;
 	FTestSitePlan TestSite;
 };

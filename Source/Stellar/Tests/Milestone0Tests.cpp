@@ -18,11 +18,11 @@
 
 namespace
 {
-	constexpr EAutomationTestFlags TestFlags = EAutomationTestFlags::EditorContext | EAutomationTestFlags::ClientContext
+	constexpr EAutomationTestFlags M0TestFlags = EAutomationTestFlags::EditorContext | EAutomationTestFlags::ClientContext
 		| EAutomationTestFlags::EngineFilter;
 }
 
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FStellarEditKinds, "Stellar.Terrain.EditKinds", TestFlags)
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FStellarEditKinds, "Stellar.Terrain.EditKinds", M0TestFlags)
 bool FStellarEditKinds::RunTest(const FString&)
 {
 	const FPlanetTerrain T(1000000.0);
@@ -104,7 +104,7 @@ bool FStellarEditKinds::RunTest(const FString&)
 	return true;
 }
 
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FStellarPrecision, "Stellar.Terrain.PrecisionAt1000km", TestFlags)
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FStellarPrecision, "Stellar.Terrain.PrecisionAt1000km", M0TestFlags)
 bool FStellarPrecision::RunTest(const FString&)
 {
 	// 1000 km out, the density is the same to 0.3 mm however a point is split into a node origin
@@ -130,7 +130,7 @@ bool FStellarPrecision::RunTest(const FString&)
 	return true;
 }
 
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FStellarStructures, "Stellar.Game.Structures", TestFlags)
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FStellarStructures, "Stellar.Game.Structures", M0TestFlags)
 bool FStellarStructures::RunTest(const FString&)
 {
 	FStructureSet S;
@@ -155,7 +155,7 @@ bool FStellarStructures::RunTest(const FString&)
 	return true;
 }
 
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FStellarTestSite, "Stellar.Game.TestSite", TestFlags)
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FStellarTestSite, "Stellar.Game.TestSite", M0TestFlags)
 bool FStellarTestSite::RunTest(const FString&)
 {
 	FPlanetTerrain T(1000000.0);
@@ -210,7 +210,7 @@ namespace
 	};
 }
 
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FStellarFluidCellular, "Stellar.Fluid.Cellular", TestFlags)
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FStellarFluidCellular, "Stellar.Fluid.Cellular", M0TestFlags)
 bool FStellarFluidCellular::RunTest(const FString&)
 {
 	// A 24 x 24 x 12 m region at 0.5 m cells, ground at 2 m, with a basin dug in it.
@@ -310,7 +310,7 @@ bool FStellarFluidCellular::RunTest(const FString&)
 	return true;
 }
 
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FStellarFluidHeightfield, "Stellar.Fluid.Heightfield", TestFlags)
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FStellarFluidHeightfield, "Stellar.Fluid.Heightfield", M0TestFlags)
 bool FStellarFluidHeightfield::RunTest(const FString&)
 {
 	// The same basin as the cellular test, in a 2.5D water layer.

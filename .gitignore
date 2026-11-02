@@ -22,3 +22,6 @@ Plugins/*/Intermediate/
 
 # Python
 __pycache__/
+
+# Moodboard exports: other artists' work, and this repository is public
+Docs/*.pdf

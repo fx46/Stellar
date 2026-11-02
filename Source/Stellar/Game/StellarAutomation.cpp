@@ -155,7 +155,13 @@ void AStellarAutomation::BuildShots()
 	const FVector3d Site = W->SiteSurface, Up = W->SiteUp, Fwd = W->SiteForward;
 	const FTestSitePlan& S = W->GetTestSite();
 	auto P = [this]() { return Pawn(); };
+	// -only=views,machines,site runs a part of the tour.
+	FString Only;
+	FParse::Value(FCommandLine::Get(), TEXT("-only="), Only, false);
+	auto Want = [&Only](const TCHAR* Group) { return Only.IsEmpty() || Only.Contains(Group); };
 
+	if (Want(TEXT("views")))
+	{
 	Steps.Add(Do([P, Site, Fwd]() { P()->DirectWalk(Site, Fwd, 0); }));
 	Steps.Add(WaitIdle(6));
 	Steps.Add(Shot(TEXT("01_eye")));
@@ -184,8 +190,47 @@ void AStellarAutomation::BuildShots()
 	Steps.Add(Do([P, Site, Up, Fwd]() { P()->DirectFreeCam(Site + Up * 30000.0, Site + Fwd * 90000.0); }));
 	Steps.Add(WaitIdle(4));
 	Steps.Add(Shot(TEXT("06_high_30km")));
+	}
 
-	if (!W->HasTestSite())
+	if (Want(TEXT("machines")))
+	{
+		// The moodboard's machine compositions (Docs/MOODBOARD.md): the stand-ins at golden hour
+		// with the light ahead (board images 9 and 14), under the crawler with a figure for scale,
+		// the walking factory, and the megastructure in haze.
+		const FVector3d Right = Up.Cross(Fwd).GetSafeNormal();
+		const FPlanetTerrain& Ground = T->GetTerrain();
+		auto Spot = [Site, Fwd, Right, &Ground](double F, double R, double H)
+		{
+			const FVector3d G = Ground.SurfaceAt(Site + Fwd * F + Right * R);
+			return G + G.GetSafeNormal() * H;
+		};
+		Steps.Add(Do([W]() { W->SetSun(5, 20); }));
+		Steps.Add(Do([P, Spot]() { P()->DirectFreeCam(Spot(60, 0, 2.2), Spot(260, -40, 12)); }));
+		Steps.Add(WaitIdle(4));
+		Steps.Add(Shot(TEXT("15_golden_hour_machines")));
+		// Lit from behind the camera, as the board's machine portraits are.
+		Steps.Add(Do([W]() { W->SetSun(16, -40); }));
+		Steps.Add(Do([P, Spot]() { P()->DirectFreeCam(Spot(178, 10, 1.6), Spot(140, 38, 8)); }));
+		Steps.Add(WaitIdle(3));
+		Steps.Add(Shot(TEXT("16_under_the_crawler")));
+		Steps.Add(Do([W]() { W->SetSun(18, 150); }));
+		Steps.Add(Do([P, Spot]() { P()->DirectFreeCam(Spot(250, -110, 1.7), Spot(330, -150, 24)); }));
+		Steps.Add(WaitIdle(3));
+		Steps.Add(Shot(TEXT("17_walking_factory")));
+		Steps.Add(Do([W]() { W->SetSun(12, 120); }));
+		Steps.Add(Do([P, W]()
+		{
+			// A three-quarter view of its face from 2.8 km and 380 m up, far enough for the haze.
+			const FVector3d Base = W->MegastructureBase, BaseUp = Base.GetSafeNormal();
+			const FVector3d Toward = FQuat4d(BaseUp, FMath::DegreesToRadians(35.0)).RotateVector(Tangent(W->MegastructureFace, BaseUp));
+			P()->DirectFreeCam(Base + Toward * 2800.0 + BaseUp * 380.0, Base + BaseUp * 140.0);
+		}));
+		Steps.Add(WaitIdle(4));
+		Steps.Add(Shot(TEXT("18_megastructure_haze")));
+		Steps.Add(Do([W]() { W->SetSun(17, 65); }));
+	}
+
+	if (!W->HasTestSite() || !Want(TEXT("site")))
 		return;
 	// The test site from the planning view, with a pad and a depot placed through the same checks
 	// the player's placement uses.

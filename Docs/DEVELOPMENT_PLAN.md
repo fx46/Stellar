@@ -568,3 +568,29 @@ notes and all 26 images, viewed at board-preview resolution. The linked video wa
 watched. The terrain residency description was updated against the source and
 `docs/TERRAIN_ARCHITECTURE.md` as of commit 4242695; no build or tests were run for
 this documentation-only revision.
+
+## Moodboard additions (2026-11-02)
+
+A second review of the board, from its full export (all notes and images; see
+[MOODBOARD.md](MOODBOARD.md)), found four directions the milestones above do not yet carry.
+They are recorded here to be scheduled, not yet as gates:
+
+- **Mobile factories.** "Entire production facilities can crawl through terrain, consuming
+  resources as they move." A factory that is also a vehicle: its machines keep local
+  buffers (milestone 1) while the chassis travels like a heavy hauler (milestone 2) and digs
+  its way like the excavators (milestone 3). Candidate: a late milestone 4 or milestone 5
+  showcase. The milestone 0 tour already shows two stand-ins of this kind (the drill crawler
+  and the walking factory).
+- **A wider module vocabulary.** The board's robot modules are drills, cargo containers,
+  wheels, legs, batteries, sensors, manipulators and fabrication tools, joined at connection
+  points ("Snatoms": a small set of parts that snap into anything). Milestone 4's sockets
+  should be sized for that whole list, with legs, sensors, manipulators and fabrication
+  tools as first-class modules.
+- **Progression tiers.** Surface industry (basic metals, generators, drones), then deep
+  industry (geothermal energy, rare minerals, high-pressure environments), then planetary
+  engineering (underground transport networks, cooling systems, enormous power
+  infrastructure), then the endgame. These map onto milestones 5, 6, 7 and 8, and should
+  name the content of each.
+- **Endgame alternatives.** Turn the planet into a stellar engine, a spacecraft, or a
+  computational megastructure. Milestone 8 builds the stellar engine; the other two are
+  open, and belong with the open decision on the engine's final function.

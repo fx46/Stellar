@@ -60,18 +60,25 @@ def multiply(material, a, b, x, y, a_out="", b_out=""):
 def terrain_material():
     m = fresh("M_Terrain", "/Game/Materials", unreal.Material, unreal.MaterialFactoryNew())
     color = expression(m, unreal.MaterialExpressionVertexColor, -1200, 0)
-    # The planet-frame position in metres, wrapped to 4096 m on the CPU so it stays precise anywhere
-    # on a 1000 km planet: UV0 = (x, y), UV1.x = z.
-    uv0 = expression(m, unreal.MaterialExpressionTextureCoordinate, -1500, 300)
-    uv0.set_editor_property("coordinate_index", 0)
-    uv1 = expression(m, unreal.MaterialExpressionTextureCoordinate, -1500, 420)
-    uv1.set_editor_property("coordinate_index", 1)
-    z = expression(m, unreal.MaterialExpressionComponentMask, -1300, 420)
-    z.set_editor_property("r", True)
-    MEL.connect_material_expressions(uv1, "", z, "")
-    position = expression(m, unreal.MaterialExpressionAppendVector, -1100, 360)
-    MEL.connect_material_expressions(uv0, "", position, "A")
-    MEL.connect_material_expressions(z, "", position, "B")
+    # The planet-frame position in metres, precise anywhere on a 1000 km planet: the component's
+    # origin wrapped to 4096 m (custom primitive data 0-2, set per terrain node and rock tile)
+    # plus the vertex's local position. (Not UVs: procedural mesh UVs are half floats, which
+    # resolve only metres at these values.)
+    origin = expression(m, unreal.MaterialExpressionVectorParameter, -1500, 300)
+    origin.set_editor_property("parameter_name", "NodeOrigin")
+    origin.set_editor_property("use_custom_primitive_data", True)
+    origin.set_editor_property("primitive_data_index", 0)
+    rgb = expression(m, unreal.MaterialExpressionComponentMask, -1300, 300)
+    for channel in ("r", "g", "b"):
+        rgb.set_editor_property(channel, True)
+    MEL.connect_material_expressions(origin, "", rgb, "")
+    local = expression(m, unreal.MaterialExpressionLocalPosition, -1500, 460)
+    metres = expression(m, unreal.MaterialExpressionDivide, -1300, 460)
+    metres.set_editor_property("const_b", 100.0)
+    MEL.connect_material_expressions(local, "", metres, "A")
+    position = expression(m, unreal.MaterialExpressionAdd, -1100, 360)
+    MEL.connect_material_expressions(rgb, "", position, "A")
+    MEL.connect_material_expressions(metres, "", position, "B")
     # Grain (half a metre), patches (a few metres) and broad variation (a hundred metres).
     fine = noise(m, position, 2.0, 3, 0.86, 1.10, -850, 260)
     mid = noise(m, position, 0.25, 4, 0.84, 1.12, -850, 420)
@@ -87,12 +94,18 @@ def terrain_material():
     MEL.connect_material_expressions(color, "A", rough, "Alpha")
     MEL.connect_material_property(rough, "", unreal.MaterialProperty.MP_ROUGHNESS)
     MEL.connect_material_property(constant(m, 0.32, -400, 560), "", unreal.MaterialProperty.MP_SPECULAR)
+
+    # No normal perturbation: a screen-space-derivative bump from this noise rendered as pixel
+    # blocks at every amplitude tried (2026-11-02). Relief comes from the 0.25 m terrain geometry
+    # and the scattered rocks; a real detail normal needs an authored rock texture set.
     MEL.recompile_material(m)
     assets.save_asset(m.get_path_name())
 
 
 def solid_material():
     m = fresh("M_Solid", "/Game/Materials", unreal.Material, unreal.MaterialFactoryNew())
+    # Stand-ins are kitbashed into instanced components.
+    m.set_editor_property("used_with_instanced_static_meshes", True)
     color = expression(m, unreal.MaterialExpressionVectorParameter, -600, 0)
     color.set_editor_property("parameter_name", "Color")
     color.set_editor_property("default_value", unreal.LinearColor(0.5, 0.5, 0.5, 1))

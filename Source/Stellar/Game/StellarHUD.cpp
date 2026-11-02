@@ -4,6 +4,7 @@
 #include "Game/Structures.h"
 #include "Terrain/PlanetTerrainActor.h"
 #include "Terrain/FluidActor.h"
+#include "Terrain/RockScatter.h"
 #include "Engine/Canvas.h"
 #include "Engine/Engine.h"
 #include "Engine/Font.h"
@@ -152,7 +153,8 @@ void AStellarHUD::DrawHUD()
 			const AFluidActor* F = W->GetFluids();
 			Line(FString::Printf(TEXT("water %.1f m3 in %d regions, %d active cells, step %.2f ms, %d springs, %.1f MB"), F->CubicMetres(),
 				F->NumRegions(), F->ActiveCells(), F->LastStepMs(), F->NumSprings(), F->Bytes() / (1024.0 * 1024.0)), 16, Py, C);
-			Line(FString::Printf(TEXT("structures %d"), W->GetStructures()->GetSet().All().Num()), 16, Py, C);
+			Line(FString::Printf(TEXT("structures %d   scattered rocks %d in %d tiles"), W->GetStructures()->GetSet().All().Num(),
+				W->GetRocks()->NumRocks(), W->GetRocks()->NumTiles()), 16, Py, C);
 		}
 		Line(FString::Printf(TEXT("memory %.0f MB used"), Mem.UsedPhysical / (1024.0 * 1024.0)), 16, Py, C);
 	}

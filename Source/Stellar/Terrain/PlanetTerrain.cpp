@@ -261,7 +261,11 @@ FColor FPlanetTerrain::VertexColor(const FVector3d& NodeMin, const FVector3f& Lo
 	const FVector3d Up = P / Rp;
 	const FHeightLayers L = Field.Layers(Up.X * R, Up.Y * R, Up.Z * R);
 	const float Slope = float(FVector3d(Normal).Dot(Up));
-	const FLinearColor Surface = Field.SurfaceColor(L, Rp - R, Slope);
+	FLinearColor Surface = Field.SurfaceColor(L, Rp - R, Slope);
+	// Cliffs show their layers.
+	const float Steep = 1.f - FMath::SmoothStep(0.5f, 0.8f, Slope);
+	if (Steep > 0.01f)
+		Surface = FMath::Lerp(Surface, Field.CliffColor(P, L, Stride), Steep * 0.9f);
 	// Alpha: how bare the rock is (0 dust, 1 rock), for the material's roughness.
 	const uint8 Bare = uint8(FMath::Clamp((1.f - FMath::SmoothStep(0.62f, 0.86f, Slope)) * 255.f + float(L.Outcrop) * 20.f, 0.f, 255.f));
 	if (Edits == nullptr)

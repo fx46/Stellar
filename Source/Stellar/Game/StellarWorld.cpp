@@ -2,7 +2,9 @@
 #include "Stellar.h"
 #include "Terrain/PlanetTerrainActor.h"
 #include "Terrain/FluidActor.h"
+#include "Terrain/RockScatter.h"
 #include "Game/Structures.h"
+#include "Game/StandIns.h"
 #include "Components/PostProcessComponent.h"
 #include "Components/VolumetricCloudComponent.h"
 #include "Misc/CommandLine.h"
@@ -17,9 +19,10 @@
 #include "Materials/MaterialInstanceDynamic.h"
 #include "HAL/PlatformTime.h"
 
+using Stellar::UU;
+
 namespace
 {
-	constexpr double UU = 100.0;
 
 	void Tangents(const FVector3d& Up, FVector3d& North, FVector3d& East)
 	{
@@ -79,7 +82,7 @@ AStellarWorld::AStellarWorld()
 	S.bOverride_AutoExposureMinBrightness = true;
 	S.bOverride_AutoExposureMaxBrightness = true;
 	S.bOverride_AutoExposureBias = true;
-	S.AutoExposureMinBrightness = 0.5f;
+	S.AutoExposureMinBrightness = 0.3f;
 	S.AutoExposureMaxBrightness = 4.f;
 	S.AutoExposureBias = -0.3f;
 }
@@ -150,18 +153,21 @@ void AStellarWorld::EnsureBuilt()
 	const FVector Centre = -Rotation.RotateVector(SiteSurface * UU);
 	Terrain->SetPlanetTransform(Centre, Rotation);
 
-	// The sky's planet: concentric with the terrain, its ground at the site (world origin). A
-	// little more dust than Earth's air (Mie) for aerial perspective across tens of kilometres.
+	// The sky's planet: concentric with the terrain, its ground at the site (world origin). Dusty
+	// desert air, after the moodboard's machines in haze (images 9-11, 22): less Rayleigh (a paler
+	// sky), more Mie dust that absorbs blue more than red (warm haze), and aerial perspective that
+	// builds over kilometres.
 	Atmosphere->SetBottomRadius(float((Terrain->RadiusMeters + SiteHeight) / 1000.0));
 	Atmosphere->SetAtmosphereHeight(80.f);
-	Atmosphere->SetMieScatteringScale(0.0075f);
-	Atmosphere->SetMieExponentialDistribution(1.6f);
-	Atmosphere->SetAerialPespectiveViewDistanceScale(1.25f);
+	Atmosphere->SetRayleighScatteringScale(0.024f);
+	Atmosphere->SetMieScatteringScale(0.012f);
+	Atmosphere->SetMieAbsorptionScale(0.006f);
+	Atmosphere->SetMieAbsorption(FLinearColor(0.3f, 0.5f, 0.85f));
+	Atmosphere->SetMieExponentialDistribution(1.8f);
+	Atmosphere->SetAerialPespectiveViewDistanceScale(2.0f);
 
 	// Afternoon light, low and to the right of the view.
-	const double Elevation = FMath::DegreesToRadians(17.0), Azimuth = FMath::DegreesToRadians(65.0);
-	SunDirection = (SiteUp * FMath::Sin(Elevation) + (SiteForward * FMath::Cos(Azimuth) + Right * FMath::Sin(Azimuth)) * FMath::Cos(Elevation)).GetSafeNormal();
-	Sun->SetWorldRotation((-Terrain->PlanetDirToWorld(SunDirection)).Rotation());
+	SetSun(17.0, 65.0);
 
 	PlaceStandIns();
 
@@ -169,6 +175,17 @@ void AStellarWorld::EnsureBuilt()
 	Structures->Setup(this, Terrain);
 	Fluids = GetWorld()->SpawnActor<AFluidActor>(FVector::ZeroVector, FRotator::ZeroRotator, Params);
 	Fluids->Setup(Terrain, Water != nullptr ? Water.Get() : SolidMaterial(FLinearColor(0.02f, 0.08f, 0.12f), 0.05f));
+	Rocks = GetWorld()->SpawnActor<ARockScatter>(FVector::ZeroVector, FRotator::ZeroRotator, Params);
+	Rocks->Setup(Terrain, Terrain->TerrainMaterial);
+	{
+		// Clear ground where the astronaut starts and where the stand-ins stand.
+		const FVector3d SiteRight = SiteUp.Cross(SiteForward).GetSafeNormal();
+		auto Clear = [&](double F, double S, double R) { Rocks->AddClearing(Terrain->GetTerrain().SurfaceAt(SiteSurface + SiteForward * F + SiteRight * S), R); };
+		Clear(0, 0, 25);
+		Clear(140, 38, 26);
+		Clear(330, -150, 30);
+		Rocks->AddClearing(MegastructureBase, 900);
+	}
 
 	if (!FParse::Param(FCommandLine::Get(), TEXT("notestsite")))
 		BuildTestSite();
@@ -290,108 +307,77 @@ USceneComponent* AStellarWorld::Group(double Forward, double Side, float YawDeg,
 	return Node;
 }
 
-namespace
+void AStellarWorld::SetSun(double ElevationDeg, double AzimuthDeg)
 {
-	/** Godot local (x right, y up, z back) metres -> Unreal local (X forward, Y right, Z up) cm. */
-	FVector FromGodot(const FVector3f& V) { return FVector(-V.Z, V.X, V.Y) * UU; }
-}
-
-void AStellarWorld::Box(USceneComponent* Parent, UMaterialInterface* M, const FVector3f& At, const FVector3f& Size)
-{
-	UStaticMeshComponent* C = NewObject<UStaticMeshComponent>(this);
-	C->SetMobility(EComponentMobility::Movable);
-	C->SetStaticMesh(CubeMesh);
-	C->SetMaterial(0, M);
-	C->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-	C->SetupAttachment(Parent);
-	C->SetRelativeLocation(FromGodot(At));
-	C->SetRelativeScale3D(FVector(Size.Z, Size.X, Size.Y)); // the cube is 1 m
-	C->RegisterComponent();
-}
-
-void AStellarWorld::Sphere(USceneComponent* Parent, UMaterialInterface* M, const FVector3f& At, float Radius)
-{
-	UStaticMeshComponent* C = NewObject<UStaticMeshComponent>(this);
-	C->SetMobility(EComponentMobility::Movable);
-	C->SetStaticMesh(SphereMesh);
-	C->SetMaterial(0, M);
-	C->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-	C->SetupAttachment(Parent);
-	C->SetRelativeLocation(FromGodot(At));
-	C->SetRelativeScale3D(FVector(Radius * 2)); // the sphere is 1 m across
-	C->RegisterComponent();
-}
-
-void AStellarWorld::Cylinder(USceneComponent* Parent, UMaterialInterface* M, const FVector3f& At, float TopRadius, float BottomRadius,
-	float Height, const FRotator& Rotation)
-{
-	UStaticMeshComponent* C = NewObject<UStaticMeshComponent>(this);
-	C->SetMobility(EComponentMobility::Movable);
-	const bool bCone = TopRadius < BottomRadius * 0.5f;
-	C->SetStaticMesh(bCone ? ConeMesh : CylinderMesh);
-	C->SetMaterial(0, M);
-	C->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-	C->SetupAttachment(Parent);
-	C->SetRelativeLocation(FromGodot(At));
-	C->SetRelativeRotation(Rotation);
-	C->SetRelativeScale3D(FVector(BottomRadius * 2, BottomRadius * 2, Height)); // 1 m across, 1 m tall
-	C->RegisterComponent();
+	SunElevationDeg = FMath::Clamp(ElevationDeg, -10.0, 90.0);
+	SunAzimuthDeg = FMath::Fmod(AzimuthDeg + 360.0, 360.0);
+	const FVector3d Right = SiteUp.Cross(SiteForward).GetSafeNormal();
+	const double E = FMath::DegreesToRadians(SunElevationDeg), A = FMath::DegreesToRadians(SunAzimuthDeg);
+	SunDirection = (SiteUp * FMath::Sin(E) + (SiteForward * FMath::Cos(A) + Right * FMath::Sin(A)) * FMath::Cos(E)).GetSafeNormal();
+	Sun->SetWorldRotation((-Terrain->PlanetDirToWorld(SunDirection)).Rotation());
 }
 
 void AStellarWorld::PlaceStandIns()
 {
-	// Stand-ins at known sizes (the scale study's): a person, a robot, a large machine and a
-	// megastructure. What the milestone 0 visual gate judges the landscape against.
-	auto Lin = [](float R, float G, float B) { return FLinearColor::FromSRGBColor(FColor(uint8(R * 255), uint8(G * 255), uint8(B * 255))); };
-	UMaterialInterface* Suit = SolidMaterial(Lin(0.86f, 0.42f, 0.12f), 0.7f);
-	UMaterialInterface* Visor = SolidMaterial(Lin(0.08f, 0.09f, 0.1f), 0.15f, 0.6f);
-	UMaterialInterface* Helmet = SolidMaterial(Lin(0.92f, 0.92f, 0.9f), 0.4f);
-	UMaterialInterface* Paint = SolidMaterial(Lin(0.78f, 0.62f, 0.22f), 0.55f, 0.2f);
-	UMaterialInterface* Steel = SolidMaterial(Lin(0.36f, 0.37f, 0.38f), 0.45f, 0.7f);
-	UMaterialInterface* Dark = SolidMaterial(Lin(0.11f, 0.11f, 0.11f), 0.85f);
-	UMaterialInterface* Concrete = SolidMaterial(Lin(0.56f, 0.55f, 0.53f), 0.95f);
-	UMaterialInterface* ConcreteDark = SolidMaterial(Lin(0.40f, 0.40f, 0.39f), 0.95f);
-	UMaterialInterface* Window = SolidMaterial(Lin(0.05f, 0.06f, 0.07f), 0.2f, 0.4f);
-	UMaterialInterface* Lamp = SolidMaterial(Lin(1.f, 0.85f, 0.6f), 0.5f, 0.f, 40.f);
-
-	// A person, 1.8 m.
-	USceneComponent* Person = Group(7, 1.6, 0);
-	Box(Person, Suit, { 0, 0.45f, 0 }, { 0.36f, 0.9f, 0.24f });
-	Box(Person, Suit, { 0, 1.2f, 0 }, { 0.5f, 0.62f, 0.3f });
-	Sphere(Person, Helmet, { 0, 1.64f, 0 }, 0.17f);
-	Box(Person, Visor, { 0, 1.66f, -0.13f }, { 0.22f, 0.1f, 0.06f });
-
-	// A person-sized robot: a 1.4 m wheeled chassis with a cargo bed.
-	USceneComponent* Robot = Group(12, -2.4, 15);
-	Box(Robot, Paint, { 0, 0.55f, 0 }, { 0.9f, 0.45f, 1.4f });
-	Box(Robot, Steel, { 0, 0.9f, 0.3f }, { 0.8f, 0.25f, 0.6f });
-	Box(Robot, Dark, { 0, 0.95f, -0.45f }, { 0.5f, 0.35f, 0.3f });
-	for (int32 I = 0; I < 4; I++)
-		Cylinder(Robot, Dark, { I % 2 == 0 ? -0.5f : 0.5f, 0.28f, I < 2 ? -0.45f : 0.45f }, 0.28f, 0.28f, 0.18f, FRotator(0, 0, 90));
-	Box(Robot, Lamp, { 0, 1.0f, -0.61f }, { 0.3f, 0.06f, 0.02f });
-
-	// A large machine: a tracked drill crawler, 34 m long and 16 m tall.
-	USceneComponent* Crawler = Group(140, 38, -25);
-	Box(Crawler, Dark, { -6.5f, 2.5f, 0 }, { 4.5f, 5.f, 34.f });
-	Box(Crawler, Dark, { 6.5f, 2.5f, 0 }, { 4.5f, 5.f, 34.f });
-	Box(Crawler, Paint, { 0, 8.f, 1.f }, { 12.f, 6.f, 26.f });
-	Box(Crawler, Steel, { 0, 12.5f, 5.f }, { 9.f, 3.f, 12.f });
-	Box(Crawler, Paint, { 3.f, 14.f, -6.f }, { 4.f, 3.5f, 4.f });
-	Box(Crawler, Window, { 3.f, 14.5f, -8.05f }, { 3.4f, 1.4f, 0.1f });
-	Cylinder(Crawler, Steel, { 0, 7.5f, -18.5f }, 0.4f, 5.5f, 11.f, FRotator(-90, 0, 0));
-	for (int32 I = 0; I < 3; I++)
-		Box(Crawler, Lamp, { -3.f + I * 3.f, 11.2f, -12.1f }, { 0.8f, 0.4f, 0.1f });
-
-	// A megastructure: a brutalist industrial mass 1.6 km long and 340 m tall, 2.6 km out.
-	USceneComponent* Mega = Group(2600, -900, 10, 40);
-	Box(Mega, Concrete, { 0, 150, 0 }, { 1600, 300, 420 });
-	Box(Mega, ConcreteDark, { -250, 330, 40 }, { 900, 80, 300 });
-	Box(Mega, Concrete, { 520, 360, -30 }, { 260, 140, 260 });
-	Box(Mega, Paint, { 0, 232, -211 }, { 1600, 14, 4 });
-	for (int32 I = 0; I < 6; I++)
-		Box(Mega, Window, { 0, 60.f + I * 30.f, -210.5f }, { 1500, 4, 2 });
-	for (int32 I = 0; I < 9; I++)
-		Box(Mega, ConcreteDark, { -720.f + I * 180.f, 150, -230 }, { 30, 300, 40 });
-	for (int32 I = 0; I < 12; I++)
-		Box(Mega, Lamp, { -660.f + I * 120.f, 236, -214 }, { 6, 3, 1 });
+	// Stand-ins at known sizes, after the moodboard's machines (Docs/MOODBOARD.md): what the
+	// milestone 0 visual gate judges the landscape against.
+	auto Lin = [](uint8 R, uint8 G, uint8 B) { return FLinearColor::FromSRGBColor(FColor(R, G, B)); };
+	FStandInPalette P;
+	P.Paint = SolidMaterial(Lin(186, 146, 58), 0.62f, 0.15f);
+	P.PaintDark = SolidMaterial(Lin(132, 104, 62), 0.75f, 0.1f);
+	P.Rust = SolidMaterial(Lin(112, 66, 42), 0.88f, 0.2f);
+	P.Steel = SolidMaterial(Lin(98, 100, 102), 0.42f, 0.85f);
+	P.SteelDark = SolidMaterial(Lin(46, 47, 49), 0.6f, 0.6f);
+	P.Rubber = SolidMaterial(Lin(26, 26, 26), 0.92f);
+	P.Concrete = SolidMaterial(Lin(150, 147, 140), 0.94f);
+	P.ConcreteDark = SolidMaterial(Lin(96, 95, 91), 0.95f);
+	P.Window = SolidMaterial(Lin(16, 20, 24), 0.15f, 0.5f);
+	P.Lamp = SolidMaterial(Lin(255, 226, 170), 0.5f, 0.f, 60.f);
+	P.Accent = SolidMaterial(Lin(214, 92, 30), 0.6f, 0.1f);
+	P.Suit = SolidMaterial(Lin(220, 107, 31), 0.7f);
+	P.Helmet = SolidMaterial(Lin(235, 235, 230), 0.4f);
+	P.Visor = SolidMaterial(Lin(20, 23, 26), 0.15f, 0.6f);
+	FKit::FMeshes Meshes;
+	Meshes.Cube = CubeMesh;
+	Meshes.Cylinder = CylinderMesh;
+	Meshes.Cone = ConeMesh;
+	Meshes.Sphere = SphereMesh;
+	auto Make = [&](double Forward, double Side, float YawDeg, double Sink, void (*Build)(FKit&, const FStandInPalette&))
+	{
+		USceneComponent* Node = Group(Forward, Side, YawDeg, Sink);
+		FKit Kit(this, Node, Meshes);
+		Build(Kit, P);
+		return Node;
+	};
+	Make(7, 1.6, 0, 0.05, &StandIns::Person);
+	Make(12, -2.4, 15, 0.05, &StandIns::Rover);
+	Make(140, 38, -25, 0.3, &StandIns::DrillCrawler);
+	Make(330, -150, 35, 0.6, &StandIns::WalkingFactory);
+	// The megastructure needs ground flat across 1.6 km, or it stands half buried in a dune: the
+	// flattest footprint within a few kilometres of 2.6 km out, front-left of the view.
+	double BestF = 2600, BestS = -900, BestScore = TNumericLimits<double>::Max();
+	const FVector3d Right = SiteUp.Cross(SiteForward).GetSafeNormal();
+	for (double F = 1800; F <= 4200; F += 200)
+		for (double S = -2200; S <= 600; S += 200)
+		{
+			double Lo = TNumericLimits<double>::Max(), Hi = -Lo;
+			for (int32 I = -2; I <= 2; I++)
+				for (int32 J = -2; J <= 2; J++)
+				{
+					double H;
+					Terrain->GetTerrain().SurfaceAt(SiteSurface + SiteForward * (F + I * 110) + Right * (S + J * 400), &H);
+					Lo = FMath::Min(Lo, H);
+					Hi = FMath::Max(Hi, H);
+				}
+			const double Score = (Hi - Lo) + 0.01 * FMath::Abs(FVector2d(F - 2600, S + 900).Size());
+			if (Score < BestScore)
+			{
+				BestScore = Score;
+				BestF = F;
+				BestS = S;
+			}
+		}
+	const USceneComponent* Mega = Make(BestF, BestS, 10, 40, &StandIns::Megastructure);
+	MegastructureBase = Terrain->WorldToPlanet(Mega->GetComponentLocation());
+	MegastructureFace = Terrain->WorldDirToPlanet(-Mega->GetForwardVector());
 }
